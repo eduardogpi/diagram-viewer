@@ -1,0 +1,90 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
+// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model CredentialSecret {
+  id          String       @id @default(cuid())
+  provider    String
+  externalId  String
+  cipherText  String
+  metadata    String?
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+  connections Connection[]
+}
+
+model Connection {
+  id           String               @id @default(cuid())
+  name         String
+  provider     String
+  host         String
+  port         Int
+  database     String
+  username     String
+  tagsJson     String               @default("[]")
+  secretId     String
+  secret       CredentialSecret     @relation(fields: [secretId], references: [id])
+  ownerId      String
+  createdAt    DateTime             @default(now())
+  updatedAt    DateTime             @updatedAt
+  preferences  WorkspacePreference[]
+  layouts      LayoutSnapshot[]
+  auditLogs    AuditLog[]
+
+  @@index([ownerId])
+  @@index([secretId])
+}
+
+model WorkspacePreference {
+  id            String     @id @default(cuid())
+  userId        String
+  connectionId  String
+  connection    Connection @relation(fields: [connectionId], references: [id])
+  theme         String?
+  favoriteTabs String      @default("[]")
+  scopeDepth    Int        @default(2)
+  minimap       Boolean    @default(true)
+  createdAt     DateTime   @default(now())
+  updatedAt     DateTime   @updatedAt
+
+  @@unique([userId, connectionId])
+}
+
+model LayoutSnapshot {
+  id           String     @id @default(cuid())
+  connectionId String
+  connection   Connection @relation(fields: [connectionId], references: [id])
+  name         String
+  checksum     String
+  nodes        String
+  edges        String
+  settings     String?
+  createdBy    String
+  createdAt    DateTime   @default(now())
+
+  @@index([connectionId, checksum])
+}
+
+model AuditLog {
+  id           String      @id @default(cuid())
+  action       String
+  userId       String
+  connectionId String?
+  connection   Connection? @relation(fields: [connectionId], references: [id])
+  context      String?
+  createdAt    DateTime    @default(now())
+
+  @@index([connectionId])
+  @@index([userId])
+}
