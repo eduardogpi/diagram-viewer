@@ -6,6 +6,7 @@ import ReactFlow, {
   Background,
   BackgroundVariant,
   Controls,
+  Handle,
   MiniMap,
   Panel,
   Position,
@@ -137,7 +138,14 @@ function TableNode({ data }: NodeProps<TableNodeData>) {
   const columns = Array.isArray(data.columns) ? data.columns : [];
 
   return (
-    <div className="min-w-[220px] rounded-xl border border-slate-800 bg-slate-950/90 shadow-2xl">
+    <div className="relative min-w-[220px] rounded-xl border border-slate-800 bg-slate-950/90 shadow-2xl">
+      {/* Handle de entrada (esquerda) */}
+      <Handle
+        type="target"
+        position={Position.Left}
+        style={{ background: palette.color, width: 10, height: 10, border: `2px solid ${palette.border}` }}
+      />
+
       <div
         className="rounded-t-xl px-4 py-2 text-xs font-semibold uppercase tracking-wider"
         style={{ background: palette.fill, color: palette.color }}
@@ -154,6 +162,13 @@ function TableNode({ data }: NodeProps<TableNodeData>) {
           ))}
         </div>
       </div>
+
+      {/* Handle de saída (direita) */}
+      <Handle
+        type="source"
+        position={Position.Right}
+        style={{ background: palette.color, width: 10, height: 10, border: `2px solid ${palette.border}` }}
+      />
     </div>
   );
 }
@@ -706,7 +721,7 @@ export default function DiagramScopeView({ connectionId }: DiagramScopeViewProps
           )}
         </aside>
 
-        <div className="h-[620px] overflow-hidden rounded-3xl border border-slate-900 bg-slate-950/60">
+        <div className="h-[calc(100vh-280px)] min-h-[540px] overflow-hidden rounded-3xl border border-slate-900 bg-slate-950/60">
           {status === "loading" && (
             <div className="flex h-full items-center justify-center text-sm text-slate-400">Montando diagrama...</div>
           )}
@@ -725,9 +740,9 @@ export default function DiagramScopeView({ connectionId }: DiagramScopeViewProps
               onEdgeClick={onEdgeClick}
               onPaneClick={() => setSelectedEdgeId(null)}
               fitView
-              fitViewOptions={{ padding: 0.25 }}
-              minZoom={0.3}
-              maxZoom={1.4}
+              fitViewOptions={{ padding: 0.15, includeHiddenNodes: false }}
+              minZoom={0.05}
+              maxZoom={2}
               nodesDraggable={false}
               nodesConnectable={false}
               elementsSelectable={false}

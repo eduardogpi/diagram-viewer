@@ -5,6 +5,12 @@ export type DiagramColumnDTO = {
   isPrimary: boolean;
   isForeign: boolean;
   references?: { table: string; column: string };
+  /** Metadados da constraint de foreign key */
+  fkMetadata?: {
+    constraintName: string;
+    onDelete: "CASCADE" | "SET NULL" | "SET DEFAULT" | "RESTRICT" | "NO ACTION";
+    onUpdate: "CASCADE" | "SET NULL" | "SET DEFAULT" | "RESTRICT" | "NO ACTION";
+  };
 };
 
 export type DiagramNodeDTO = {
@@ -22,6 +28,11 @@ export type DiagramEdgeDTO = {
   scope: string;
   constraint: string;
   columns: { source: string; target: string }[];
+  /** Tipo de cardinalidade: 1:1, 1:N, N:1 */
+  cardinality?: "1:1" | "1:N" | "N:1";
+  /** Regras de delete e update da FK */
+  onDelete?: string;
+  onUpdate?: string;
 };
 
 export type DiagramScopeDTO = {

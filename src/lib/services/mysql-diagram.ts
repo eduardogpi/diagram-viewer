@@ -59,16 +59,22 @@ export async function buildMySqlDiagram(connection: DiagramConnectionInput): Pro
     );
 
     const [fkRows] = await mysqlConn.execute<RowDataPacket[]>(
-      `SELECT CONSTRAINT_NAME as constraintName,
-              TABLE_NAME as tableName,
-              COLUMN_NAME as columnName,
-              REFERENCED_TABLE_NAME as referencedTable,
-              REFERENCED_COLUMN_NAME as referencedColumn,
-              ORDINAL_POSITION as ordinalPosition
-         FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE
-        WHERE TABLE_SCHEMA = ?
-          AND REFERENCED_TABLE_NAME IS NOT NULL
-        ORDER BY CONSTRAINT_NAME, ORDINAL_POSITION`,
+      `SELECT kcu.CONSTRAINT_NAME as constraintName,
+              kcu.TABLE_NAME as tableName,
+              kcu.COLUMN_NAME as columnName,
+              kcu.REFERENCED_TABLE_NAME as referencedTable,
+              kcu.REFERENCED_COLUMN_NAME as referencedColumn,
+              kcu.ORDINAL_POSITION as ordinalPosition,
+              rc.UPDATE_RULE as updateRule,
+              rc.DELETE_RULE as deleteRule
+         FROM INFORMATION_SCHEMA.KEY_COLUMN_USAGE kcu
+         LEFT JOIN INFORMATION_SCHEMA.REFERENTIAL_CONSTRAINTS rc
+            ON rc.CONSTRAINT_NAME = kcu.CONSTRAINT_NAME
+           AND rc.CONSTRAINT_SCHEMA = kcu.CONSTRAINT_SCHEMA
+           AND rc.UNIQUE_CONSTRAINT_SCHEMA = kcu.REFERENCED_TABLE_SCHEMA
+        WHERE kcu.TABLE_SCHEMA = ?
+          AND kcu.REFERENCED_TABLE_NAME IS NOT NULL
+        ORDER BY kcu.CONSTRAINT_NAME, kcu.ORDINAL_POSITION`,
       [connection.database]
     );
 
