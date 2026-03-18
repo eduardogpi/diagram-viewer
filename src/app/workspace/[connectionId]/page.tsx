@@ -21,6 +21,7 @@ export default async function WorkspacePage({
   const { connectionId } = await params;
   const resolvedSearchParams = await searchParams;
   const activeTab = resolvedSearchParams?.tab ?? "editor";
+  const isDiagramTab = activeTab === "diagram";
 
   return (
     <div className="space-y-6">
@@ -40,7 +41,9 @@ export default async function WorkspacePage({
         ))}
       </div>
 
-      <section className="rounded-2xl border border-slate-900 bg-slate-950/60 p-6">
+      <section
+        className={`rounded-2xl border border-slate-900 bg-slate-950/60 ${isDiagramTab ? "p-2 md:p-3" : "p-6"}`}
+      >
         {activeTab === "editor" && (
           <div className="space-y-4">
             <h2 className="text-lg font-semibold text-slate-100">Editor SQL</h2>

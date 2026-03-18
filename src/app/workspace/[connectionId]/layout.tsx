@@ -75,12 +75,12 @@ export default async function WorkspaceLayout({
           </div>
         </header>
 
-        <div className="mt-8 grid gap-6 lg:grid-cols-[1fr_320px]">
-          <section className="rounded-2xl border border-slate-900 bg-slate-950/40 p-4">
+        <div className="mt-8 grid gap-6 xl:grid-cols-[minmax(0,1fr)_260px]">
+          <section className="min-w-0 rounded-2xl border border-slate-900 bg-slate-950/40 p-3 md:p-4">
             {children}
           </section>
 
-          <aside className="rounded-2xl border border-slate-900 bg-slate-950/60 p-4">
+          <aside className="rounded-2xl border border-slate-900 bg-slate-950/60 p-4 xl:sticky xl:top-6 xl:self-start">
             <h2 className="text-sm font-semibold text-slate-300">Detalhes</h2>
             <dl className="mt-4 space-y-3 text-sm text-slate-400">
               <div className="flex justify-between">
