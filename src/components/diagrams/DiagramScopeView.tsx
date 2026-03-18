@@ -17,8 +17,9 @@ import ReactFlow, {
 } from "reactflow";
 import "reactflow/dist/style.css";
 
-const DAGRE_NODE_WIDTH = 240;
-const DAGRE_NODE_HEIGHT = 280;
+const DAGRE_NODE_WIDTH = 320;
+const DAGRE_NODE_HEIGHT = 360;
+const DEFAULT_VISIBLE_COLUMNS = 10;
 
 const basePalette = [
   "#22d3ee",
@@ -113,10 +114,10 @@ type TableEdgeData = {
 
 function ColumnRow({ column }: { column: RemoteColumn }) {
   return (
-    <div className="flex items-center justify-between text-[11px] text-slate-300">
+    <div className="flex items-center justify-between gap-3 text-xs text-slate-300">
       <span className="flex items-center gap-1">
         <span
-          className={`inline-flex h-4 min-w-4 items-center justify-center rounded border px-1 text-[10px] ${
+          className={`inline-flex h-5 min-w-6 items-center justify-center rounded border px-1.5 text-[10px] font-semibold ${
             column.isPrimary
               ? "border-amber-400 text-amber-300"
               : column.isForeign
@@ -126,9 +127,9 @@ function ColumnRow({ column }: { column: RemoteColumn }) {
         >
           {column.isPrimary ? "PK" : column.isForeign ? "FK" : ""}
         </span>
-        <span className="font-mono text-[11px] text-slate-100">{column.name}</span>
+        <span className="font-mono text-[12px] text-slate-100">{column.name}</span>
       </span>
-      <span className="font-mono text-[10px] text-slate-500">{column.type}</span>
+      <span className="font-mono text-[11px] text-slate-500">{column.type}</span>
     </div>
   );
 }
@@ -136,38 +137,44 @@ function ColumnRow({ column }: { column: RemoteColumn }) {
 function TableNode({ data }: NodeProps<TableNodeData>) {
   const palette = getPalette(data.scope);
   const columns = Array.isArray(data.columns) ? data.columns : [];
+  const visibleColumns = columns.slice(0, DEFAULT_VISIBLE_COLUMNS);
+  const hiddenCount = Math.max(columns.length - visibleColumns.length, 0);
 
   return (
-    <div className="relative min-w-[220px] rounded-xl border border-slate-800 bg-slate-950/90 shadow-2xl">
-      {/* Handle de entrada (esquerda) */}
+    <div className="relative min-w-[300px] rounded-2xl border border-slate-800 bg-slate-950/95 shadow-[0_30px_80px_rgba(2,6,23,0.45)]">
       <Handle
         type="target"
         position={Position.Left}
-        style={{ background: palette.color, width: 10, height: 10, border: `2px solid ${palette.border}` }}
+        style={{ background: palette.color, width: 12, height: 12, border: `2px solid ${palette.border}` }}
       />
 
       <div
-        className="rounded-t-xl px-4 py-2 text-xs font-semibold uppercase tracking-wider"
+        className="rounded-t-2xl px-5 py-3 text-sm font-semibold uppercase tracking-[0.24em]"
         style={{ background: palette.fill, color: palette.color }}
       >
         {data.label}
       </div>
-      <div className="border-t border-slate-900/80 px-4 py-2 text-[10px] text-slate-500">{data.schema}</div>
-      <div className="border-t border-slate-900/80 px-4 py-3 text-[11px] text-slate-400">
-        <p className="text-[10px] uppercase tracking-[0.3em] text-slate-500">Colunas</p>
-        <div className="mt-2 flex max-h-56 flex-col gap-1 overflow-auto pr-2">
+      <div className="border-t border-slate-900/80 px-5 py-2.5 text-xs text-slate-500">{data.schema}</div>
+      <div className="border-t border-slate-900/80 px-5 py-4 text-sm text-slate-400">
+        <div className="flex items-center justify-between gap-3">
+          <p className="text-[11px] uppercase tracking-[0.3em] text-slate-500">Colunas</p>
+          <p className="text-[11px] text-slate-500">{columns.length} no total</p>
+        </div>
+        <div className="mt-3 flex max-h-72 flex-col gap-2 overflow-auto pr-2">
           {columns.length === 0 && <p className="text-slate-600">Sem colunas</p>}
-          {columns.map((column) => (
+          {visibleColumns.map((column) => (
             <ColumnRow key={column.name} column={column} />
           ))}
+          {hiddenCount > 0 && (
+            <p className="pt-2 text-[11px] text-slate-500">+{hiddenCount} colunas ocultas para manter a leitura.</p>
+          )}
         </div>
       </div>
 
-      {/* Handle de saída (direita) */}
       <Handle
         type="source"
         position={Position.Right}
-        style={{ background: palette.color, width: 10, height: 10, border: `2px solid ${palette.border}` }}
+        style={{ background: palette.color, width: 12, height: 12, border: `2px solid ${palette.border}` }}
       />
     </div>
   );
@@ -316,10 +323,11 @@ function getLayoutedNodes(
   const dagreGraph = new dagre.graphlib.Graph().setDefaultEdgeLabel(() => ({}));
   dagreGraph.setGraph({
     rankdir: "TB",
-    ranksep: 85,
-    nodesep: 35,
-    marginx: 24,
-    marginy: 24,
+    ranksep: 140,
+    nodesep: 90,
+    edgesep: 50,
+    marginx: 48,
+    marginy: 48,
     acyclicer: "greedy",
   });
 
@@ -363,6 +371,7 @@ export default function DiagramScopeView({ connectionId }: DiagramScopeViewProps
   const [targetTableId, setTargetTableId] = useState("");
   const [sourceColumnName, setSourceColumnName] = useState("");
   const [targetColumnName, setTargetColumnName] = useState("");
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -485,13 +494,13 @@ export default function DiagramScopeView({ connectionId }: DiagramScopeViewProps
             manual,
           },
           label: edge.constraint,
-          labelBgPadding: [6, 2],
-          labelBgBorderRadius: 6,
-          labelStyle: { fill: palette.color, fontSize: 10 },
+          labelBgPadding: [8, 4],
+          labelBgBorderRadius: 8,
+          labelStyle: { fill: palette.color, fontSize: 11, fontWeight: 600 },
           animated: manual,
           style: {
             stroke: palette.color,
-            strokeWidth: manual ? 3 : 2,
+            strokeWidth: manual ? 3 : 2.25,
             strokeDasharray: manual ? "6 4" : undefined,
           },
         } satisfies Edge<TableEdgeData>;
@@ -549,14 +558,24 @@ export default function DiagramScopeView({ connectionId }: DiagramScopeViewProps
             Você pode usar o escopo detectado automaticamente ou montar seu próprio subconjunto de tabelas e relações.
           </p>
         </div>
-        <div className="rounded-xl border border-slate-800/60 bg-slate-900/80 px-4 py-2 text-sm text-slate-300">
-          {status === "loading" ? "Carregando..." : `${visibleNodesData.length} tabelas • ${edges.length} relações`}
+        <div className="flex items-center gap-3">
+          <button
+            type="button"
+            onClick={() => setSidebarCollapsed((current) => !current)}
+            className="rounded-xl border border-slate-700 bg-slate-900/80 px-4 py-2 text-sm text-slate-200 transition hover:border-slate-500"
+          >
+            {sidebarCollapsed ? "Mostrar painel" : "Ocultar painel"}
+          </button>
+          <div className="rounded-xl border border-slate-800/60 bg-slate-900/80 px-4 py-2 text-sm text-slate-300">
+            {status === "loading" ? "Carregando..." : `${visibleNodesData.length} tabelas • ${edges.length} relações`}
+          </div>
         </div>
       </div>
 
       {status === "error" && (
         <div className="rounded-2xl border border-red-900/50 bg-red-950/30 p-4 text-sm text-red-200">
-          Não foi possível carregar o diagrama desta conexão. Verifique se as credenciais têm acesso ao INFORMATION_SCHEMA.
+          Não foi possível carregar o diagrama desta conexão. Verifique se as credenciais têm acesso ao
+          INFORMATION_SCHEMA.
         </div>
       )}
 
@@ -579,149 +598,151 @@ export default function DiagramScopeView({ connectionId }: DiagramScopeViewProps
         </div>
       )}
 
-      <div className="grid gap-4 xl:grid-cols-[320px_1fr]">
-        <aside className="space-y-4 rounded-2xl border border-slate-900 bg-slate-950/60 p-4">
-          <div className="rounded-2xl border border-slate-800/50 bg-slate-900/40 p-4 text-xs text-slate-400">
-            <p>
-              Escopo ativo: <span className="text-slate-200">{activeScope?.label ?? "Visão geral"}</span>
-            </p>
-            <p className="mt-1">Ative o modo manual para escolher exatamente quais cards entram no fluxo.</p>
-          </div>
+      <div className={`grid gap-4 ${sidebarCollapsed ? "" : "xl:grid-cols-[340px_1fr]"}`}>
+        {!sidebarCollapsed && (
+          <aside className="space-y-4 rounded-2xl border border-slate-900 bg-slate-950/60 p-4">
+            <div className="rounded-2xl border border-slate-800/50 bg-slate-900/40 p-4 text-xs text-slate-400">
+              <p>
+                Escopo ativo: <span className="text-slate-200">{activeScope?.label ?? "Visão geral"}</span>
+              </p>
+              <p className="mt-1">Ative o modo manual para escolher exatamente quais cards entram no fluxo.</p>
+            </div>
 
-          <label className="flex items-center justify-between rounded-xl border border-slate-800/60 bg-slate-900/50 px-3 py-3 text-sm text-slate-200">
-            <span>Modo manual</span>
-            <input
-              type="checkbox"
-              checked={manualMode}
-              onChange={(e) => setManualMode(e.target.checked)}
-              className="h-4 w-4"
-            />
-          </label>
+            <label className="flex items-center justify-between rounded-xl border border-slate-800/60 bg-slate-900/50 px-3 py-3 text-sm text-slate-200">
+              <span>Modo manual</span>
+              <input
+                type="checkbox"
+                checked={manualMode}
+                onChange={(e) => setManualMode(e.target.checked)}
+                className="h-4 w-4"
+              />
+            </label>
 
-          {manualMode && (
-            <>
-              <div className="rounded-2xl border border-slate-800/60 bg-slate-900/40 p-4">
-                <div className="mb-3 flex items-center justify-between">
-                  <h4 className="text-sm font-semibold text-slate-100">Tabelas do escopo</h4>
-                  <button
-                    type="button"
-                    onClick={() => setSelectedTableIds(scopedTables.map((table) => table.id))}
-                    className="text-xs text-cyan-300"
-                  >
-                    Selecionar todas
-                  </button>
-                </div>
-                <div className="max-h-56 space-y-2 overflow-auto pr-1">
-                  {scopedTables.map((table) => (
-                    <label key={table.id} className="flex items-center gap-2 text-sm text-slate-300">
-                      <input
-                        type="checkbox"
-                        checked={selectedTableIds.includes(table.id)}
-                        onChange={() => toggleTableSelection(table.id)}
-                        className="h-4 w-4"
-                      />
-                      <span className="font-mono text-[12px]">{table.label}</span>
-                    </label>
-                  ))}
-                </div>
-              </div>
-
-              <div className="rounded-2xl border border-slate-800/60 bg-slate-900/40 p-4">
-                <h4 className="mb-3 text-sm font-semibold text-slate-100">Adicionar FK manual</h4>
-                <div className="space-y-3">
-                  <select
-                    value={sourceTableId}
-                    onChange={(e) => {
-                      setSourceTableId(e.target.value);
-                      setSourceColumnName("");
-                    }}
-                    className="w-full rounded-lg border border-slate-800 bg-slate-950 px-3 py-2 text-sm text-slate-200"
-                  >
-                    <option value="">Tabela origem</option>
-                    {visibleNodesData.map((table) => (
-                      <option key={table.id} value={table.id}>
-                        {table.label}
-                      </option>
+            {manualMode && (
+              <>
+                <div className="rounded-2xl border border-slate-800/60 bg-slate-900/40 p-4">
+                  <div className="mb-3 flex items-center justify-between">
+                    <h4 className="text-sm font-semibold text-slate-100">Tabelas do escopo</h4>
+                    <button
+                      type="button"
+                      onClick={() => setSelectedTableIds(scopedTables.map((table) => table.id))}
+                      className="text-xs text-cyan-300"
+                    >
+                      Selecionar todas
+                    </button>
+                  </div>
+                  <div className="max-h-56 space-y-2 overflow-auto pr-1">
+                    {scopedTables.map((table) => (
+                      <label key={table.id} className="flex items-center gap-2 text-sm text-slate-300">
+                        <input
+                          type="checkbox"
+                          checked={selectedTableIds.includes(table.id)}
+                          onChange={() => toggleTableSelection(table.id)}
+                          className="h-4 w-4"
+                        />
+                        <span className="font-mono text-[12px]">{table.label}</span>
+                      </label>
                     ))}
-                  </select>
-
-                  <select
-                    value={sourceColumnName}
-                    onChange={(e) => setSourceColumnName(e.target.value)}
-                    className="w-full rounded-lg border border-slate-800 bg-slate-950 px-3 py-2 text-sm text-slate-200"
-                  >
-                    <option value="">Coluna origem</option>
-                    {sourceColumns.map((column) => (
-                      <option key={column.name} value={column.name}>
-                        {column.name}
-                      </option>
-                    ))}
-                  </select>
-
-                  <select
-                    value={targetTableId}
-                    onChange={(e) => {
-                      setTargetTableId(e.target.value);
-                      setTargetColumnName("");
-                    }}
-                    className="w-full rounded-lg border border-slate-800 bg-slate-950 px-3 py-2 text-sm text-slate-200"
-                  >
-                    <option value="">Tabela destino</option>
-                    {visibleNodesData.map((table) => (
-                      <option key={table.id} value={table.id}>
-                        {table.label}
-                      </option>
-                    ))}
-                  </select>
-
-                  <select
-                    value={targetColumnName}
-                    onChange={(e) => setTargetColumnName(e.target.value)}
-                    className="w-full rounded-lg border border-slate-800 bg-slate-950 px-3 py-2 text-sm text-slate-200"
-                  >
-                    <option value="">Coluna destino</option>
-                    {targetColumns.map((column) => (
-                      <option key={column.name} value={column.name}>
-                        {column.name}
-                      </option>
-                    ))}
-                  </select>
-
-                  <button
-                    type="button"
-                    onClick={createManualEdge}
-                    className="w-full rounded-lg bg-cyan-500 px-3 py-2 text-sm font-medium text-slate-950"
-                  >
-                    Criar conexão manual
-                  </button>
+                  </div>
                 </div>
-              </div>
 
-              <div className="rounded-2xl border border-slate-800/60 bg-slate-900/40 p-4">
-                <h4 className="mb-3 text-sm font-semibold text-slate-100">Relações manuais</h4>
-                <div className="space-y-2">
-                  {manualEdges.length === 0 && <p className="text-xs text-slate-500">Nenhuma relação manual criada.</p>}
-                  {manualEdges.map((edge) => (
-                    <div key={edge.id} className="rounded-xl border border-slate-800 bg-slate-950/60 p-3 text-xs text-slate-300">
-                      <p className="font-mono">
-                        {edge.source}.{edge.sourceColumn} {"->"} {edge.target}.{edge.targetColumn}
-                      </p>
-                      <button
-                        type="button"
-                        onClick={() => removeManualEdge(edge.id)}
-                        className="mt-2 text-[11px] text-red-300"
-                      >
-                        Remover
-                      </button>
-                    </div>
-                  ))}
+                <div className="rounded-2xl border border-slate-800/60 bg-slate-900/40 p-4">
+                  <h4 className="mb-3 text-sm font-semibold text-slate-100">Adicionar FK manual</h4>
+                  <div className="space-y-3">
+                    <select
+                      value={sourceTableId}
+                      onChange={(e) => {
+                        setSourceTableId(e.target.value);
+                        setSourceColumnName("");
+                      }}
+                      className="w-full rounded-lg border border-slate-800 bg-slate-950 px-3 py-2 text-sm text-slate-200"
+                    >
+                      <option value="">Tabela origem</option>
+                      {visibleNodesData.map((table) => (
+                        <option key={table.id} value={table.id}>
+                          {table.label}
+                        </option>
+                      ))}
+                    </select>
+
+                    <select
+                      value={sourceColumnName}
+                      onChange={(e) => setSourceColumnName(e.target.value)}
+                      className="w-full rounded-lg border border-slate-800 bg-slate-950 px-3 py-2 text-sm text-slate-200"
+                    >
+                      <option value="">Coluna origem</option>
+                      {sourceColumns.map((column) => (
+                        <option key={column.name} value={column.name}>
+                          {column.name}
+                        </option>
+                      ))}
+                    </select>
+
+                    <select
+                      value={targetTableId}
+                      onChange={(e) => {
+                        setTargetTableId(e.target.value);
+                        setTargetColumnName("");
+                      }}
+                      className="w-full rounded-lg border border-slate-800 bg-slate-950 px-3 py-2 text-sm text-slate-200"
+                    >
+                      <option value="">Tabela destino</option>
+                      {visibleNodesData.map((table) => (
+                        <option key={table.id} value={table.id}>
+                          {table.label}
+                        </option>
+                      ))}
+                    </select>
+
+                    <select
+                      value={targetColumnName}
+                      onChange={(e) => setTargetColumnName(e.target.value)}
+                      className="w-full rounded-lg border border-slate-800 bg-slate-950 px-3 py-2 text-sm text-slate-200"
+                    >
+                      <option value="">Coluna destino</option>
+                      {targetColumns.map((column) => (
+                        <option key={column.name} value={column.name}>
+                          {column.name}
+                        </option>
+                      ))}
+                    </select>
+
+                    <button
+                      type="button"
+                      onClick={createManualEdge}
+                      className="w-full rounded-lg bg-cyan-500 px-3 py-2 text-sm font-medium text-slate-950"
+                    >
+                      Criar conexão manual
+                    </button>
+                  </div>
                 </div>
-              </div>
-            </>
-          )}
-        </aside>
 
-        <div className="h-[calc(100vh-280px)] min-h-[540px] overflow-hidden rounded-3xl border border-slate-900 bg-slate-950/60">
+                <div className="rounded-2xl border border-slate-800/60 bg-slate-900/40 p-4">
+                  <h4 className="mb-3 text-sm font-semibold text-slate-100">Relações manuais</h4>
+                  <div className="space-y-2">
+                    {manualEdges.length === 0 && <p className="text-xs text-slate-500">Nenhuma relação manual criada.</p>}
+                    {manualEdges.map((edge) => (
+                      <div key={edge.id} className="rounded-xl border border-slate-800 bg-slate-950/60 p-3 text-xs text-slate-300">
+                        <p className="font-mono">
+                          {edge.source}.{edge.sourceColumn} {"->"} {edge.target}.{edge.targetColumn}
+                        </p>
+                        <button
+                          type="button"
+                          onClick={() => removeManualEdge(edge.id)}
+                          className="mt-2 text-[11px] text-red-300"
+                        >
+                          Remover
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </>
+            )}
+          </aside>
+        )}
+
+        <div className="relative h-[calc(100vh-220px)] min-h-[680px] overflow-hidden rounded-3xl border border-slate-900 bg-slate-950/60">
           {status === "loading" && (
             <div className="flex h-full items-center justify-center text-sm text-slate-400">Montando diagrama...</div>
           )}
@@ -740,26 +761,29 @@ export default function DiagramScopeView({ connectionId }: DiagramScopeViewProps
               onEdgeClick={onEdgeClick}
               onPaneClick={() => setSelectedEdgeId(null)}
               fitView
-              fitViewOptions={{ padding: 0.15, includeHiddenNodes: false }}
-              minZoom={0.05}
-              maxZoom={2}
+              fitViewOptions={{ padding: 0.08, includeHiddenNodes: false, minZoom: 0.65 }}
+              defaultViewport={{ x: 0, y: 0, zoom: 0.9 }}
+              minZoom={0.2}
+              maxZoom={2.4}
               nodesDraggable={false}
               nodesConnectable={false}
               elementsSelectable={false}
               proOptions={{ hideAttribution: true }}
               nodeTypes={nodeTypes}
             >
-              <Background gap={18} color="#1f2937" variant={BackgroundVariant.Lines} />
+              <Background gap={24} size={1.2} color="#1f2937" variant={BackgroundVariant.Lines} />
               <MiniMap
                 nodeColor={(node) => getPalette((node.data as TableNodeData).scope).color}
                 maskColor="rgba(2,6,23,0.85)"
+                pannable
+                zoomable
               />
               <Controls showInteractive={false} className="!bg-slate-900/80 !border-slate-800" />
 
               {selectedEdge && (
                 <Panel
                   position="top-right"
-                  className="w-72 rounded-2xl border border-slate-800 bg-slate-950/95 p-4 text-xs text-slate-300 shadow-2xl"
+                  className="w-80 rounded-2xl border border-slate-800 bg-slate-950/95 p-4 text-xs text-slate-300 shadow-2xl"
                 >
                   <div className="space-y-2">
                     <p className="text-[10px] uppercase tracking-[0.3em] text-slate-500">
