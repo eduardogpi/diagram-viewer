@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type Dispatch, type SetStateAction } from "react";
 import dagre from "@dagrejs/dagre";
 import ReactFlow, {
   Background,
@@ -17,753 +17,208 @@ import ReactFlow, {
 } from "reactflow";
 import "reactflow/dist/style.css";
 
-const DAGRE_NODE_WIDTH = 320;
-const DAGRE_NODE_HEIGHT = 360;
-const DEFAULT_VISIBLE_COLUMNS = 10;
+const NODE_W = 320;
+const NODE_H = 360;
+const MAX_COLS = 10;
+const PALETTE = ["#22d3ee", "#a855f7", "#f97316", "#fcd34d", "#34d399", "#fb7185"];
 
-const basePalette = [
-  "#22d3ee",
-  "#a855f7",
-  "#f97316",
-  "#fcd34d",
-  "#34d399",
-  "#fb7185",
-  "#38bdf8",
-  "#f472b6",
-];
+type Props = { connectionId: string };
+type Col = { name: string; type: string; isPrimary: boolean; isForeign: boolean };
+type Tbl = { id: string; label: string; schema: string; scope: string; columns: Col[] };
+type Rel = { id: string; source: string; target: string; scope: string; constraint: string; columns: { source: string; target: string }[] };
+type Scope = { id: string; label: string; description: string; tables: number };
+type Payload = { nodes: Tbl[]; edges: Rel[]; scopes: Scope[] };
+type NodeData = { label: string; schema: string; scope: string; columns: Col[] };
 
-const scopeStylesCache = new Map<string, { color: string; fill: string; border: string }>();
+const nodeTypes = { table: TableCard };
 
-function getPalette(scope: string) {
-  if (!scopeStylesCache.has(scope)) {
-    const hash = Array.from(scope).reduce((acc, char) => acc + char.charCodeAt(0), 0);
-    const base = basePalette[hash % basePalette.length];
-    scopeStylesCache.set(scope, {
-      color: base,
-      border: `${base}88`,
-      fill: `${base}22`,
-    });
-  }
-  return scopeStylesCache.get(scope)!;
+function palette(scope: string) {
+  const base = PALETTE[Array.from(scope).reduce((a, c) => a + c.charCodeAt(0), 0) % PALETTE.length];
+  return { color: base, fill: `${base}22`, border: `${base}88` };
 }
 
-type DiagramScopeViewProps = {
-  connectionId: string;
-};
-
-type RemoteColumn = {
-  name: string;
-  type: string;
-  isNullable: boolean;
-  isPrimary: boolean;
-  isForeign: boolean;
-  references?: { table: string; column: string };
-};
-
-type RemoteNode = {
-  id: string;
-  label: string;
-  schema: string;
-  scope: string;
-  columns: RemoteColumn[];
-};
-
-type RemoteEdge = {
-  id: string;
-  source: string;
-  target: string;
-  scope: string;
-  constraint: string;
-  columns: { source: string; target: string }[];
-};
-
-type RemoteScope = {
-  id: string;
-  label: string;
-  description: string;
-  tables: number;
-};
-
-type RemotePayload = {
-  nodes: RemoteNode[];
-  edges: RemoteEdge[];
-  scopes: RemoteScope[];
-};
-
-type ManualEdge = {
-  id: string;
-  source: string;
-  target: string;
-  sourceColumn: string;
-  targetColumn: string;
-};
-
-type TableNodeData = {
-  label: string;
-  schema: string;
-  scope: string;
-  columns: RemoteColumn[];
-};
-
-type TableEdgeData = {
-  scope: string;
-  constraint: string;
-  columns: { source: string; target: string }[];
-  manual?: boolean;
-};
-
-function ColumnRow({ column }: { column: RemoteColumn }) {
-  return (
-    <div className="flex items-center justify-between gap-3 text-xs text-slate-300">
-      <span className="flex items-center gap-1">
-        <span
-          className={`inline-flex h-5 min-w-6 items-center justify-center rounded border px-1.5 text-[10px] font-semibold ${
-            column.isPrimary
-              ? "border-amber-400 text-amber-300"
-              : column.isForeign
-                ? "border-cyan-400 text-cyan-200"
-                : "border-slate-600 text-slate-400"
-          }`}
-        >
-          {column.isPrimary ? "PK" : column.isForeign ? "FK" : ""}
-        </span>
-        <span className="font-mono text-[12px] text-slate-100">{column.name}</span>
-      </span>
-      <span className="font-mono text-[11px] text-slate-500">{column.type}</span>
-    </div>
-  );
-}
-
-function TableNode({ data }: NodeProps<TableNodeData>) {
-  const palette = getPalette(data.scope);
-  const columns = Array.isArray(data.columns) ? data.columns : [];
-  const visibleColumns = columns.slice(0, DEFAULT_VISIBLE_COLUMNS);
-  const hiddenCount = Math.max(columns.length - visibleColumns.length, 0);
-
+function TableCard({ data }: NodeProps<NodeData>) {
+  const p = palette(data.scope);
+  const columns = data.columns.slice(0, MAX_COLS);
+  const hidden = Math.max(data.columns.length - columns.length, 0);
   return (
     <div className="relative min-w-[300px] rounded-2xl border border-slate-800 bg-slate-950/95 shadow-[0_30px_80px_rgba(2,6,23,0.45)]">
-      <Handle
-        type="target"
-        position={Position.Left}
-        style={{ background: palette.color, width: 12, height: 12, border: `2px solid ${palette.border}` }}
-      />
-
-      <div
-        className="rounded-t-2xl px-5 py-3 text-sm font-semibold uppercase tracking-[0.24em]"
-        style={{ background: palette.fill, color: palette.color }}
-      >
-        {data.label}
-      </div>
+      <Handle type="target" position={Position.Left} style={{ background: p.color, width: 12, height: 12, border: `2px solid ${p.border}` }} />
+      <div className="rounded-t-2xl px-5 py-3 text-sm font-semibold uppercase tracking-[0.24em]" style={{ background: p.fill, color: p.color }}>{data.label}</div>
       <div className="border-t border-slate-900/80 px-5 py-2.5 text-xs text-slate-500">{data.schema}</div>
-      <div className="border-t border-slate-900/80 px-5 py-4 text-sm text-slate-400">
-        <div className="flex items-center justify-between gap-3">
-          <p className="text-[11px] uppercase tracking-[0.3em] text-slate-500">Colunas</p>
-          <p className="text-[11px] text-slate-500">{columns.length} no total</p>
-        </div>
-        <div className="mt-3 flex max-h-72 flex-col gap-2 overflow-auto pr-2">
-          {columns.length === 0 && <p className="text-slate-600">Sem colunas</p>}
-          {visibleColumns.map((column) => (
-            <ColumnRow key={column.name} column={column} />
+      <div className="border-t border-slate-900/80 px-5 py-4">
+        <div className="mb-3 flex items-center justify-between text-[11px] uppercase tracking-[0.3em] text-slate-500"><span>Colunas</span><span>{data.columns.length}</span></div>
+        <div className="flex max-h-72 flex-col gap-2 overflow-auto pr-2">
+          {columns.map((col) => (
+            <div key={col.name} className="flex items-center justify-between gap-3 text-xs text-slate-300">
+              <span className="flex items-center gap-2">
+                <span className={`inline-flex h-5 min-w-6 items-center justify-center rounded border px-1.5 text-[10px] font-semibold ${col.isPrimary ? "border-amber-400 text-amber-300" : col.isForeign ? "border-cyan-400 text-cyan-200" : "border-slate-600 text-slate-400"}`}>{col.isPrimary ? "PK" : col.isForeign ? "FK" : ""}</span>
+                <span className="font-mono text-[12px] text-slate-100">{col.name}</span>
+              </span>
+              <span className="font-mono text-[11px] text-slate-500">{col.type}</span>
+            </div>
           ))}
-          {hiddenCount > 0 && (
-            <p className="pt-2 text-[11px] text-slate-500">+{hiddenCount} colunas ocultas para manter a leitura.</p>
-          )}
+          {hidden > 0 && <p className="pt-2 text-[11px] text-slate-500">+{hidden} colunas ocultas para manter a leitura.</p>}
         </div>
       </div>
-
-      <Handle
-        type="source"
-        position={Position.Right}
-        style={{ background: palette.color, width: 12, height: 12, border: `2px solid ${palette.border}` }}
-      />
+      <Handle type="source" position={Position.Right} style={{ background: p.color, width: 12, height: 12, border: `2px solid ${p.border}` }} />
     </div>
   );
 }
 
-const nodeTypes = { table: TableNode };
-
-function normalizeColumn(column: unknown): RemoteColumn | null {
-  if (!column || typeof column !== "object") {
-    return null;
-  }
-
-  const candidate = column as Partial<RemoteColumn>;
-  if (typeof candidate.name !== "string" || typeof candidate.type !== "string") {
-    return null;
-  }
-
+function normalize(payload: unknown): Payload {
+  const empty: Payload = { nodes: [], edges: [], scopes: [] };
+  if (!payload || typeof payload !== "object") return empty;
+  const raw = payload as Partial<Payload>;
   return {
-    name: candidate.name,
-    type: candidate.type,
-    isNullable: Boolean(candidate.isNullable),
-    isPrimary: Boolean(candidate.isPrimary),
-    isForeign: Boolean(candidate.isForeign),
-    references:
-      candidate.references &&
-      typeof candidate.references.table === "string" &&
-      typeof candidate.references.column === "string"
-        ? candidate.references
-        : undefined,
+    nodes: Array.isArray(raw.nodes) ? raw.nodes.filter(Boolean) as Tbl[] : [],
+    edges: Array.isArray(raw.edges) ? raw.edges.filter(Boolean) as Rel[] : [],
+    scopes: Array.isArray(raw.scopes) ? raw.scopes.filter(Boolean) as Scope[] : [],
   };
 }
 
-function normalizeDiagramPayload(payload: unknown): RemotePayload {
-  const empty: RemotePayload = { nodes: [], edges: [], scopes: [] };
-  if (!payload || typeof payload !== "object") {
-    return empty;
-  }
-
-  const raw = payload as Partial<RemotePayload>;
-
-  const nodes = Array.isArray(raw.nodes)
-    ? raw.nodes
-        .map((node) => {
-          if (!node || typeof node !== "object") {
-            return null;
-          }
-
-          const candidate = node as Partial<RemoteNode>;
-          if (
-            typeof candidate.id !== "string" ||
-            typeof candidate.label !== "string" ||
-            typeof candidate.schema !== "string" ||
-            typeof candidate.scope !== "string"
-          ) {
-            return null;
-          }
-
-          return {
-            id: candidate.id,
-            label: candidate.label,
-            schema: candidate.schema,
-            scope: candidate.scope,
-            columns: Array.isArray(candidate.columns)
-              ? candidate.columns.map(normalizeColumn).filter((item): item is RemoteColumn => item !== null)
-              : [],
-          } satisfies RemoteNode;
-        })
-        .filter((item): item is RemoteNode => item !== null)
-    : [];
-
-  const edges = Array.isArray(raw.edges)
-    ? raw.edges
-        .map((edge) => {
-          if (!edge || typeof edge !== "object") {
-            return null;
-          }
-
-          const candidate = edge as Partial<RemoteEdge>;
-          if (
-            typeof candidate.id !== "string" ||
-            typeof candidate.source !== "string" ||
-            typeof candidate.target !== "string" ||
-            typeof candidate.scope !== "string" ||
-            typeof candidate.constraint !== "string"
-          ) {
-            return null;
-          }
-
-          return {
-            id: candidate.id,
-            source: candidate.source,
-            target: candidate.target,
-            scope: candidate.scope,
-            constraint: candidate.constraint,
-            columns: Array.isArray(candidate.columns)
-              ? candidate.columns
-                  .map((column) => {
-                    if (!column || typeof column !== "object") {
-                      return null;
-                    }
-                    const pair = column as { source?: unknown; target?: unknown };
-                    return typeof pair.source === "string" && typeof pair.target === "string"
-                      ? { source: pair.source, target: pair.target }
-                      : null;
-                  })
-                  .filter((item): item is { source: string; target: string } => item !== null)
-              : [],
-          } satisfies RemoteEdge;
-        })
-        .filter((item): item is RemoteEdge => item !== null)
-    : [];
-
-  const scopes = Array.isArray(raw.scopes)
-    ? raw.scopes
-        .map((scope) => {
-          if (!scope || typeof scope !== "object") {
-            return null;
-          }
-
-          const candidate = scope as Partial<RemoteScope>;
-          if (
-            typeof candidate.id !== "string" ||
-            typeof candidate.label !== "string" ||
-            typeof candidate.description !== "string"
-          ) {
-            return null;
-          }
-
-          return {
-            id: candidate.id,
-            label: candidate.label,
-            description: candidate.description,
-            tables: typeof candidate.tables === "number" ? candidate.tables : 0,
-          } satisfies RemoteScope;
-        })
-        .filter((item): item is RemoteScope => item !== null)
-    : [];
-
-  return { nodes, edges, scopes };
-}
-
-function getLayoutedNodes(
-  nodes: Array<Pick<Node<TableNodeData>, "id" | "data" | "type">>,
-  edges: Array<Pick<Edge<TableEdgeData>, "source" | "target">>
-) {
-  const dagreGraph = new dagre.graphlib.Graph().setDefaultEdgeLabel(() => ({}));
-  dagreGraph.setGraph({
-    rankdir: "TB",
-    ranksep: 140,
-    nodesep: 90,
-    edgesep: 50,
-    marginx: 48,
-    marginy: 48,
-    acyclicer: "greedy",
-  });
-
-  nodes.forEach((node) => {
-    dagreGraph.setNode(node.id, { width: DAGRE_NODE_WIDTH, height: DAGRE_NODE_HEIGHT });
-  });
-
-  edges.forEach((edge) => {
-    dagreGraph.setEdge(edge.source, edge.target);
-  });
-
-  dagre.layout(dagreGraph);
-
-  return nodes.map((node) => {
-    const position = dagreGraph.node(node.id);
-    return {
-      ...node,
-      position: {
-        x: position.x - DAGRE_NODE_WIDTH / 2,
-        y: position.y - DAGRE_NODE_HEIGHT / 2,
-      },
-      targetPosition: Position.Left,
-      sourcePosition: Position.Right,
-    } satisfies Node<TableNodeData>;
+function layoutNodes(nodes: Array<Pick<Node<NodeData>, "id" | "type" | "data">>, edges: Array<Pick<Edge, "source" | "target">>) {
+  const g = new dagre.graphlib.Graph().setDefaultEdgeLabel(() => ({}));
+  g.setGraph({ rankdir: "TB", ranksep: 140, nodesep: 90, edgesep: 50, marginx: 48, marginy: 48, acyclicer: "greedy" });
+  nodes.forEach((n) => g.setNode(n.id, { width: NODE_W, height: NODE_H }));
+  edges.forEach((e) => g.setEdge(e.source, e.target));
+  dagre.layout(g);
+  return nodes.map((n) => {
+    const pos = g.node(n.id);
+    return { ...n, position: { x: pos.x - NODE_W / 2, y: pos.y - NODE_H / 2 }, sourcePosition: Position.Right, targetPosition: Position.Left } satisfies Node<NodeData>;
   });
 }
 
-function makeManualEdgeId(source: string, sourceColumn: string, target: string, targetColumn: string) {
-  return `manual-${source}-${sourceColumn}-${target}-${targetColumn}`;
-}
-
-export default function DiagramScopeView({ connectionId }: DiagramScopeViewProps) {
-  const [selectedScope, setSelectedScope] = useState<string>("ALL");
-  const [payload, setPayload] = useState<RemotePayload | null>(null);
+export default function DiagramScopeView({ connectionId }: Props) {
+  const [payload, setPayload] = useState<Payload | null>(null);
   const [status, setStatus] = useState<"idle" | "loading" | "error">("idle");
   const [selectedEdgeId, setSelectedEdgeId] = useState<string | null>(null);
-  const [manualMode, setManualMode] = useState(false);
+  const [showFilters, setShowFilters] = useState(false);
+  const [scopeQuery, setScopeQuery] = useState("");
+  const [tableQuery, setTableQuery] = useState("");
+  const [selectedScopeIds, setSelectedScopeIds] = useState<string[]>([]);
   const [selectedTableIds, setSelectedTableIds] = useState<string[]>([]);
-  const [manualEdges, setManualEdges] = useState<ManualEdge[]>([]);
-  const [sourceTableId, setSourceTableId] = useState("");
-  const [targetTableId, setTargetTableId] = useState("");
-  const [sourceColumnName, setSourceColumnName] = useState("");
-  const [targetColumnName, setTargetColumnName] = useState("");
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
-
-    async function loadDiagram() {
+    async function load() {
       setStatus("loading");
       try {
         const res = await fetch(`/api/connections/${connectionId}/diagram`, { cache: "no-store" });
-        if (!res.ok) {
-          throw new Error(await res.text());
-        }
-
-        const data = normalizeDiagramPayload(await res.json());
+        if (!res.ok) throw new Error(await res.text());
         if (!cancelled) {
-          setPayload(data);
+          setPayload(normalize(await res.json()));
           setStatus("idle");
         }
-      } catch (error) {
-        if (!cancelled) {
-          console.error("Falha ao carregar diagrama", error);
-          setStatus("error");
-        }
+      } catch {
+        if (!cancelled) setStatus("error");
       }
     }
-
-    loadDiagram();
-
+    load();
     return () => {
       cancelled = true;
     };
   }, [connectionId]);
 
-  const onEdgeClick: EdgeMouseHandler = (_event, edge) => {
-    setSelectedEdgeId(edge.id);
-  };
-
-  const availableTables = payload?.nodes ?? [];
-  const scopeFilters = useMemo(() => {
-    if (!payload) {
-      return [] as { id: string; label: string; description: string }[];
-    }
-
-    return [
-      { id: "ALL", label: "Visão geral", description: "Todas as entidades conectadas" },
-      ...payload.scopes.map((scope) => ({
-        id: scope.id,
-        label: scope.label,
-        description: scope.description,
-      })),
-    ];
+  const scopes = useMemo(() => {
+    const byScope = new Map<string, Tbl[]>();
+    (payload?.nodes ?? []).forEach((node) => byScope.set(node.scope, [...(byScope.get(node.scope) ?? []), node]));
+    return (payload?.scopes ?? []).map((scope) => ({ ...scope, tablesList: (byScope.get(scope.id) ?? []).sort((a, b) => a.label.localeCompare(b.label)) }));
   }, [payload]);
 
-  const scopedTables = useMemo(
-    () => availableTables.filter((node) => selectedScope === "ALL" || node.scope === selectedScope),
-    [availableTables, selectedScope]
-  );
+  const allScopeIds = scopes.map((scope) => scope.id);
+  const activeScopeIds = selectedScopeIds.length > 0 ? selectedScopeIds : allScopeIds;
+  const activeScopeSet = new Set(activeScopeIds);
+  const selectedTableSet = new Set(selectedTableIds);
 
-  const visibleNodesData = useMemo(() => {
-    if (!manualMode || selectedTableIds.length === 0) {
-      return scopedTables;
-    }
+  const filteredScopes = useMemo(() => {
+    const sq = scopeQuery.trim().toLowerCase();
+    const tq = tableQuery.trim().toLowerCase();
+    return scopes
+      .filter((scope) => !sq || scope.label.toLowerCase().includes(sq) || scope.description.toLowerCase().includes(sq))
+      .map((scope) => ({
+        ...scope,
+        filteredTables: scope.tablesList.filter((table) => !tq || table.label.toLowerCase().includes(tq) || table.schema.toLowerCase().includes(tq) || table.columns.some((col) => col.name.toLowerCase().includes(tq))),
+      }));
+  }, [scopeQuery, scopes, tableQuery]);
 
-    const selected = new Set(selectedTableIds);
-    return scopedTables.filter((node) => selected.has(node.id));
-  }, [manualMode, scopedTables, selectedTableIds]);
-
-  const mergedEdgesData = useMemo(() => {
-    const manual: RemoteEdge[] = manualEdges.map((edge) => ({
-      id: edge.id,
-      source: edge.source,
-      target: edge.target,
-      scope: "manual",
-      constraint: "Manual FK",
-      columns: [{ source: edge.sourceColumn, target: edge.targetColumn }],
-    }));
-
-    return [...(payload?.edges ?? []), ...manual];
-  }, [manualEdges, payload?.edges]);
+  const visibleTables = useMemo(() => {
+    const scoped = (payload?.nodes ?? []).filter((node) => activeScopeSet.has(node.scope));
+    return selectedTableIds.length === 0 ? scoped : scoped.filter((node) => selectedTableSet.has(node.id));
+  }, [activeScopeSet, payload?.nodes, selectedTableIds.length]);
 
   const nodes = useMemo(() => {
-    const baseNodes = visibleNodesData.map((node) => ({
-      id: node.id,
-      type: "table",
-      data: {
-        label: node.label,
-        schema: node.schema,
-        scope: node.scope,
-        columns: node.columns,
-      },
-    }));
-
-    const visibleIds = new Set(visibleNodesData.map((node) => node.id));
-    const baseEdges = mergedEdgesData
-      .filter((edge) => visibleIds.has(edge.source) && visibleIds.has(edge.target))
-      .map((edge) => ({
-        source: edge.source,
-        target: edge.target,
-      }));
-
-    return getLayoutedNodes(baseNodes, baseEdges);
-  }, [mergedEdgesData, visibleNodesData]);
+    const visibleIds = new Set(visibleTables.map((n) => n.id));
+    return layoutNodes(
+      visibleTables.map((node) => ({ id: node.id, type: "table", data: { label: node.label, schema: node.schema, scope: node.scope, columns: node.columns } })),
+      (payload?.edges ?? []).filter((edge) => visibleIds.has(edge.source) && visibleIds.has(edge.target)).map((edge) => ({ source: edge.source, target: edge.target }))
+    );
+  }, [payload?.edges, visibleTables]);
 
   const edges = useMemo(() => {
     const allowed = new Set(nodes.map((node) => node.id));
-
-    return mergedEdgesData
+    return (payload?.edges ?? [])
       .filter((edge) => allowed.has(edge.source) && allowed.has(edge.target))
       .map((edge) => {
-        const palette = getPalette(edge.scope);
-        const manual = edge.constraint === "Manual FK";
-
+        const p = palette(edge.scope);
         return {
           id: edge.id,
           source: edge.source,
           target: edge.target,
-          data: {
-            scope: edge.scope,
-            constraint: edge.constraint,
-            columns: edge.columns,
-            manual,
-          },
+          data: { scope: edge.scope, constraint: edge.constraint, columns: edge.columns },
           label: edge.constraint,
           labelBgPadding: [8, 4],
           labelBgBorderRadius: 8,
-          labelStyle: { fill: palette.color, fontSize: 11, fontWeight: 600 },
-          animated: manual,
-          style: {
-            stroke: palette.color,
-            strokeWidth: manual ? 3 : 2.25,
-            strokeDasharray: manual ? "6 4" : undefined,
-          },
-        } satisfies Edge<TableEdgeData>;
+          labelStyle: { fill: p.color, fontSize: 11, fontWeight: 600 },
+          style: { stroke: p.color, strokeWidth: 2.25 },
+        } satisfies Edge;
       });
-  }, [mergedEdgesData, nodes]);
+  }, [nodes, payload?.edges]);
 
-  const selectedEdge = edges.find((edge) => edge.id === selectedEdgeId) ?? null;
-  const activeScope = scopeFilters.find((scope) => scope.id === selectedScope);
-  const sourceColumns = availableTables.find((table) => table.id === sourceTableId)?.columns ?? [];
-  const targetColumns = availableTables.find((table) => table.id === targetTableId)?.columns ?? [];
+  const selectedEdge = edges.find((edge) => edge.id === selectedEdgeId) as Edge<{ constraint: string; columns: { source: string; target: string }[] }> | undefined;
 
-  function toggleTableSelection(tableId: string) {
-    setSelectedTableIds((current) =>
-      current.includes(tableId) ? current.filter((id) => id !== tableId) : [...current, tableId]
-    );
+  function toggleInList(id: string, setter: Dispatch<SetStateAction<string[]>>) {
+    setter((current) => (current.includes(id) ? current.filter((item) => item !== id) : [...current, id]));
   }
 
-  function createManualEdge() {
-    if (!sourceTableId || !targetTableId || !sourceColumnName || !targetColumnName) {
-      return;
-    }
-
-    const id = makeManualEdgeId(sourceTableId, sourceColumnName, targetTableId, targetColumnName);
-    setManualEdges((current) => {
-      if (current.some((edge) => edge.id === id)) {
-        return current;
-      }
-
-      return [
-        ...current,
-        {
-          id,
-          source: sourceTableId,
-          target: targetTableId,
-          sourceColumn: sourceColumnName,
-          targetColumn: targetColumnName,
-        },
-      ];
-    });
-    setSelectedEdgeId(id);
-  }
-
-  function removeManualEdge(id: string) {
-    setManualEdges((current) => current.filter((edge) => edge.id !== id));
-    setSelectedEdgeId((current) => (current === id ? null : current));
+  function clearFilters() {
+    setSelectedScopeIds([]);
+    setSelectedTableIds([]);
+    setScopeQuery("");
+    setTableQuery("");
   }
 
   return (
-    <div className="space-y-4">
-      <div className="flex flex-wrap justify-between gap-4">
-        <div>
-          <p className="text-xs uppercase tracking-[0.4em] text-slate-500">Escopos disponíveis</p>
-          <h3 className="text-xl font-semibold text-slate-100">Diagramas orientados a fluxo</h3>
-          <p className="text-sm text-slate-400">
-            Você pode usar o escopo detectado automaticamente ou montar seu próprio subconjunto de tabelas e relações.
-          </p>
-        </div>
-        <div className="flex items-center gap-3">
-          <button
-            type="button"
-            onClick={() => setSidebarCollapsed((current) => !current)}
-            className="rounded-xl border border-slate-700 bg-slate-900/80 px-4 py-2 text-sm text-slate-200 transition hover:border-slate-500"
-          >
-            {sidebarCollapsed ? "Mostrar painel" : "Ocultar painel"}
-          </button>
-          <div className="rounded-xl border border-slate-800/60 bg-slate-900/80 px-4 py-2 text-sm text-slate-300">
-            {status === "loading" ? "Carregando..." : `${visibleNodesData.length} tabelas • ${edges.length} relações`}
+    <>
+      <div className="space-y-4">
+        <div className="flex flex-wrap items-start justify-between gap-4 rounded-3xl border border-slate-900 bg-slate-950/70 px-5 py-4">
+          <div>
+            <p className="text-xs uppercase tracking-[0.4em] text-slate-500">Canvas do diagrama</p>
+            <h3 className="text-xl font-semibold text-slate-100">Fluxos relacionais por escopo</h3>
+            <p className="mt-1 text-sm text-slate-400">O canvas agora prioriza área útil, e os filtros ficam em um modal com seleção por escopo e tabela.</p>
+          </div>
+          <div className="flex flex-wrap items-center gap-3">
+            <button type="button" onClick={() => setShowFilters(true)} className="rounded-xl bg-cyan-400 px-4 py-2 text-sm font-semibold text-slate-950 hover:bg-cyan-300">Abrir filtros</button>
+            <button type="button" onClick={clearFilters} className="rounded-xl border border-slate-700 bg-slate-900/80 px-4 py-2 text-sm text-slate-200 hover:border-slate-500">Limpar</button>
+            <div className="rounded-xl border border-slate-800/60 bg-slate-900/80 px-4 py-2 text-sm text-slate-300">{status === "loading" ? "Carregando..." : `${visibleTables.length} tabelas • ${edges.length} relações`}</div>
           </div>
         </div>
-      </div>
 
-      {status === "error" && (
-        <div className="rounded-2xl border border-red-900/50 bg-red-950/30 p-4 text-sm text-red-200">
-          Não foi possível carregar o diagrama desta conexão. Verifique se as credenciais têm acesso ao
-          INFORMATION_SCHEMA.
-        </div>
-      )}
+        {status === "error" && <div className="rounded-2xl border border-red-900/50 bg-red-950/30 p-4 text-sm text-red-200">Não foi possível carregar o diagrama desta conexão.</div>}
 
-      {scopeFilters.length > 0 && (
-        <div className="flex flex-wrap gap-3">
-          {scopeFilters.map((scope) => (
-            <button
-              key={scope.id}
-              onClick={() => setSelectedScope(scope.id)}
-              className={`rounded-2xl border px-4 py-2 text-left text-xs transition md:text-sm ${
-                selectedScope === scope.id
-                  ? "border-cyan-400 bg-cyan-400/10 text-cyan-100 shadow-[0_0_18px_rgba(34,211,238,0.25)]"
-                  : "border-slate-800/80 text-slate-400 hover:border-slate-600 hover:text-slate-100"
-              }`}
-            >
-              <p className="font-semibold">{scope.label}</p>
-              <p className="text-[11px] text-slate-400">{scope.description}</p>
-            </button>
-          ))}
-        </div>
-      )}
-
-      <div className={`grid gap-4 ${sidebarCollapsed ? "" : "xl:grid-cols-[340px_1fr]"}`}>
-        {!sidebarCollapsed && (
-          <aside className="space-y-4 rounded-2xl border border-slate-900 bg-slate-950/60 p-4">
-            <div className="rounded-2xl border border-slate-800/50 bg-slate-900/40 p-4 text-xs text-slate-400">
-              <p>
-                Escopo ativo: <span className="text-slate-200">{activeScope?.label ?? "Visão geral"}</span>
-              </p>
-              <p className="mt-1">Ative o modo manual para escolher exatamente quais cards entram no fluxo.</p>
-            </div>
-
-            <label className="flex items-center justify-between rounded-xl border border-slate-800/60 bg-slate-900/50 px-3 py-3 text-sm text-slate-200">
-              <span>Modo manual</span>
-              <input
-                type="checkbox"
-                checked={manualMode}
-                onChange={(e) => setManualMode(e.target.checked)}
-                className="h-4 w-4"
-              />
-            </label>
-
-            {manualMode && (
-              <>
-                <div className="rounded-2xl border border-slate-800/60 bg-slate-900/40 p-4">
-                  <div className="mb-3 flex items-center justify-between">
-                    <h4 className="text-sm font-semibold text-slate-100">Tabelas do escopo</h4>
-                    <button
-                      type="button"
-                      onClick={() => setSelectedTableIds(scopedTables.map((table) => table.id))}
-                      className="text-xs text-cyan-300"
-                    >
-                      Selecionar todas
-                    </button>
-                  </div>
-                  <div className="max-h-56 space-y-2 overflow-auto pr-1">
-                    {scopedTables.map((table) => (
-                      <label key={table.id} className="flex items-center gap-2 text-sm text-slate-300">
-                        <input
-                          type="checkbox"
-                          checked={selectedTableIds.includes(table.id)}
-                          onChange={() => toggleTableSelection(table.id)}
-                          className="h-4 w-4"
-                        />
-                        <span className="font-mono text-[12px]">{table.label}</span>
-                      </label>
-                    ))}
-                  </div>
-                </div>
-
-                <div className="rounded-2xl border border-slate-800/60 bg-slate-900/40 p-4">
-                  <h4 className="mb-3 text-sm font-semibold text-slate-100">Adicionar FK manual</h4>
-                  <div className="space-y-3">
-                    <select
-                      value={sourceTableId}
-                      onChange={(e) => {
-                        setSourceTableId(e.target.value);
-                        setSourceColumnName("");
-                      }}
-                      className="w-full rounded-lg border border-slate-800 bg-slate-950 px-3 py-2 text-sm text-slate-200"
-                    >
-                      <option value="">Tabela origem</option>
-                      {visibleNodesData.map((table) => (
-                        <option key={table.id} value={table.id}>
-                          {table.label}
-                        </option>
-                      ))}
-                    </select>
-
-                    <select
-                      value={sourceColumnName}
-                      onChange={(e) => setSourceColumnName(e.target.value)}
-                      className="w-full rounded-lg border border-slate-800 bg-slate-950 px-3 py-2 text-sm text-slate-200"
-                    >
-                      <option value="">Coluna origem</option>
-                      {sourceColumns.map((column) => (
-                        <option key={column.name} value={column.name}>
-                          {column.name}
-                        </option>
-                      ))}
-                    </select>
-
-                    <select
-                      value={targetTableId}
-                      onChange={(e) => {
-                        setTargetTableId(e.target.value);
-                        setTargetColumnName("");
-                      }}
-                      className="w-full rounded-lg border border-slate-800 bg-slate-950 px-3 py-2 text-sm text-slate-200"
-                    >
-                      <option value="">Tabela destino</option>
-                      {visibleNodesData.map((table) => (
-                        <option key={table.id} value={table.id}>
-                          {table.label}
-                        </option>
-                      ))}
-                    </select>
-
-                    <select
-                      value={targetColumnName}
-                      onChange={(e) => setTargetColumnName(e.target.value)}
-                      className="w-full rounded-lg border border-slate-800 bg-slate-950 px-3 py-2 text-sm text-slate-200"
-                    >
-                      <option value="">Coluna destino</option>
-                      {targetColumns.map((column) => (
-                        <option key={column.name} value={column.name}>
-                          {column.name}
-                        </option>
-                      ))}
-                    </select>
-
-                    <button
-                      type="button"
-                      onClick={createManualEdge}
-                      className="w-full rounded-lg bg-cyan-500 px-3 py-2 text-sm font-medium text-slate-950"
-                    >
-                      Criar conexão manual
-                    </button>
-                  </div>
-                </div>
-
-                <div className="rounded-2xl border border-slate-800/60 bg-slate-900/40 p-4">
-                  <h4 className="mb-3 text-sm font-semibold text-slate-100">Relações manuais</h4>
-                  <div className="space-y-2">
-                    {manualEdges.length === 0 && <p className="text-xs text-slate-500">Nenhuma relação manual criada.</p>}
-                    {manualEdges.map((edge) => (
-                      <div key={edge.id} className="rounded-xl border border-slate-800 bg-slate-950/60 p-3 text-xs text-slate-300">
-                        <p className="font-mono">
-                          {edge.source}.{edge.sourceColumn} {"->"} {edge.target}.{edge.targetColumn}
-                        </p>
-                        <button
-                          type="button"
-                          onClick={() => removeManualEdge(edge.id)}
-                          className="mt-2 text-[11px] text-red-300"
-                        >
-                          Remover
-                        </button>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              </>
-            )}
-          </aside>
-        )}
-
-        <div className="relative h-[calc(100vh-220px)] min-h-[680px] overflow-hidden rounded-3xl border border-slate-900 bg-slate-950/60">
-          {status === "loading" && (
-            <div className="flex h-full items-center justify-center text-sm text-slate-400">Montando diagrama...</div>
-          )}
-
-          {status !== "loading" && nodes.length === 0 && (
-            <div className="flex h-full flex-col items-center justify-center gap-2 text-sm text-slate-400">
-              <p>Nenhuma tabela encontrada para este escopo.</p>
-              <p>Selecione outro escopo ou monte um escopo manual.</p>
-            </div>
-          )}
-
+        <div className="relative h-[calc(100vh-120px)] min-h-[820px] overflow-hidden rounded-[2rem] border border-slate-900 bg-slate-950/60">
+          {status === "loading" && <div className="flex h-full items-center justify-center text-sm text-slate-400">Montando diagrama...</div>}
+          {status !== "loading" && nodes.length === 0 && <div className="flex h-full flex-col items-center justify-center gap-2 text-sm text-slate-400"><p>Nenhuma tabela encontrada com os filtros atuais.</p><p>Abra o modal de filtros e selecione outros escopos ou tabelas.</p></div>}
           {nodes.length > 0 && (
             <ReactFlow
               nodes={nodes}
               edges={edges}
-              onEdgeClick={onEdgeClick}
+              onEdgeClick={((_e, edge) => setSelectedEdgeId(edge.id)) as EdgeMouseHandler}
               onPaneClick={() => setSelectedEdgeId(null)}
               fitView
-              fitViewOptions={{ padding: 0.08, includeHiddenNodes: false, minZoom: 0.65 }}
-              defaultViewport={{ x: 0, y: 0, zoom: 0.9 }}
-              minZoom={0.2}
+              fitViewOptions={{ padding: 0.06, includeHiddenNodes: false, minZoom: 0.72 }}
+              defaultViewport={{ x: 0, y: 0, zoom: 0.92 }}
+              minZoom={0.25}
               maxZoom={2.4}
               nodesDraggable={false}
               nodesConnectable={false}
@@ -772,37 +227,16 @@ export default function DiagramScopeView({ connectionId }: DiagramScopeViewProps
               nodeTypes={nodeTypes}
             >
               <Background gap={24} size={1.2} color="#1f2937" variant={BackgroundVariant.Lines} />
-              <MiniMap
-                nodeColor={(node) => getPalette((node.data as TableNodeData).scope).color}
-                maskColor="rgba(2,6,23,0.85)"
-                pannable
-                zoomable
-              />
+              <MiniMap nodeColor={(node) => palette((node.data as NodeData).scope).color} maskColor="rgba(2,6,23,0.85)" pannable zoomable />
               <Controls showInteractive={false} className="!bg-slate-900/80 !border-slate-800" />
-
               {selectedEdge && (
-                <Panel
-                  position="top-right"
-                  className="w-80 rounded-2xl border border-slate-800 bg-slate-950/95 p-4 text-xs text-slate-300 shadow-2xl"
-                >
+                <Panel position="top-right" className="w-80 rounded-2xl border border-slate-800 bg-slate-950/95 p-4 text-xs text-slate-300 shadow-2xl">
                   <div className="space-y-2">
-                    <p className="text-[10px] uppercase tracking-[0.3em] text-slate-500">
-                      {selectedEdge.data?.manual ? "Relação manual" : "Foreign key"}
-                    </p>
+                    <p className="text-[10px] uppercase tracking-[0.3em] text-slate-500">Foreign key</p>
                     <p className="font-semibold text-slate-100">{selectedEdge.data?.constraint ?? selectedEdge.label}</p>
                     <div className="rounded-xl border border-slate-800/80 bg-slate-900/70 p-3">
-                      <p className="font-mono text-[11px] text-slate-200">
-                        {selectedEdge.source} {"->"} {selectedEdge.target}
-                      </p>
-                      <div className="mt-2 space-y-1">
-                        {selectedEdge.data?.columns?.map((column) => (
-                          <div key={`${column.source}-${column.target}`} className="flex justify-between gap-3 text-[11px]">
-                            <span className="font-mono text-cyan-200">{column.source}</span>
-                            <span className="text-slate-500">{"->"}</span>
-                            <span className="font-mono text-emerald-200">{column.target}</span>
-                          </div>
-                        ))}
-                      </div>
+                      <p className="font-mono text-[11px] text-slate-200">{selectedEdge.source} {"->"} {selectedEdge.target}</p>
+                      <div className="mt-2 space-y-1">{selectedEdge.data?.columns?.map((c) => <div key={`${c.source}-${c.target}`} className="flex justify-between gap-3 text-[11px]"><span className="font-mono text-cyan-200">{c.source}</span><span className="text-slate-500">{"->"}</span><span className="font-mono text-emerald-200">{c.target}</span></div>)}</div>
                     </div>
                   </div>
                 </Panel>
@@ -811,6 +245,93 @@ export default function DiagramScopeView({ connectionId }: DiagramScopeViewProps
           )}
         </div>
       </div>
-    </div>
+
+      {showFilters && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 p-4 backdrop-blur-sm">
+          <div className="flex h-[88vh] w-full max-w-6xl flex-col overflow-hidden rounded-[2rem] border border-slate-800 bg-slate-950 shadow-[0_40px_120px_rgba(2,6,23,0.75)]">
+            <div className="flex flex-wrap items-start justify-between gap-4 border-b border-slate-800 px-6 py-5">
+              <div>
+                <p className="text-xs uppercase tracking-[0.35em] text-slate-500">Filtros do diagrama</p>
+                <h4 className="text-2xl font-semibold text-slate-100">Escopos e tabelas visíveis</h4>
+                <p className="mt-1 text-sm text-slate-400">Se nenhuma tabela estiver marcada, o diagrama mostra todas as tabelas dos escopos ativos.</p>
+              </div>
+              <button type="button" onClick={() => setShowFilters(false)} className="rounded-xl border border-slate-700 bg-slate-900 px-4 py-2 text-sm text-slate-200 hover:border-slate-500">Fechar</button>
+            </div>
+
+            <div className="grid min-h-0 flex-1 lg:grid-cols-[260px_1fr]">
+              <aside className="border-r border-slate-800 bg-slate-950/80 p-5">
+                <div className="space-y-3">
+                  <input value={scopeQuery} onChange={(e) => setScopeQuery(e.target.value)} placeholder="Buscar escopo" className="w-full rounded-xl border border-slate-800 bg-slate-900 px-3 py-2 text-sm text-slate-100 outline-none focus:border-cyan-400" />
+                  <div className="flex gap-2">
+                    <button type="button" onClick={() => setSelectedScopeIds(allScopeIds)} className="flex-1 rounded-xl border border-slate-700 px-3 py-2 text-xs text-slate-200">Todos</button>
+                    <button type="button" onClick={() => setSelectedScopeIds([])} className="flex-1 rounded-xl border border-slate-700 px-3 py-2 text-xs text-slate-200">Limpar</button>
+                  </div>
+                </div>
+                <div className="mt-5 space-y-2 overflow-auto pr-1">
+                  {filteredScopes.map((scope) => {
+                    const checked = activeScopeSet.has(scope.id);
+                    return (
+                      <label key={scope.id} className={`block rounded-2xl border p-3 ${checked ? "border-cyan-400 bg-cyan-400/10" : "border-slate-800 bg-slate-900/40"}`}>
+                        <div className="flex items-start gap-3">
+                          <input type="checkbox" checked={checked} onChange={() => toggleInList(scope.id, setSelectedScopeIds)} className="mt-1 h-4 w-4" />
+                          <div>
+                            <p className="text-sm font-semibold text-slate-100">{scope.label}</p>
+                            <p className="mt-1 text-xs text-slate-400">{scope.description}</p>
+                            <p className="mt-2 text-[11px] uppercase tracking-[0.25em] text-slate-500">{scope.tablesList.length} tabelas</p>
+                          </div>
+                        </div>
+                      </label>
+                    );
+                  })}
+                </div>
+              </aside>
+
+              <div className="flex min-h-0 flex-col bg-slate-950/60">
+                <div className="border-b border-slate-800 px-5 py-4">
+                  <div className="flex flex-wrap items-center gap-3">
+                    <input value={tableQuery} onChange={(e) => setTableQuery(e.target.value)} placeholder="Buscar tabela, schema ou coluna" className="min-w-[260px] flex-1 rounded-xl border border-slate-800 bg-slate-900 px-3 py-2 text-sm text-slate-100 outline-none focus:border-cyan-400" />
+                    <button type="button" onClick={() => setSelectedTableIds([])} className="rounded-xl border border-slate-700 px-4 py-2 text-sm text-slate-200">Mostrar todas</button>
+                  </div>
+                </div>
+
+                <div className="min-h-0 flex-1 overflow-auto px-5 py-5">
+                  <div className="space-y-5">
+                    {filteredScopes.filter((scope) => activeScopeSet.has(scope.id)).map((scope) => (
+                      <section key={scope.id} className="rounded-3xl border border-slate-800 bg-slate-900/35 p-4">
+                        <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
+                          <div><h5 className="text-lg font-semibold text-slate-100">{scope.label}</h5><p className="text-sm text-slate-400">{scope.description}</p></div>
+                          <div className="flex gap-2">
+                            <button type="button" onClick={() => setSelectedTableIds((c) => Array.from(new Set([...c, ...scope.tablesList.map((t) => t.id)])))} className="rounded-xl border border-slate-700 px-3 py-2 text-xs text-slate-200">Selecionar escopo</button>
+                            <button type="button" onClick={() => setSelectedTableIds((c) => c.filter((id) => !scope.tablesList.some((t) => t.id === id)))} className="rounded-xl border border-slate-700 px-3 py-2 text-xs text-slate-200">Limpar escopo</button>
+                          </div>
+                        </div>
+                        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+                          {scope.filteredTables.map((table) => {
+                            const checked = selectedTableSet.has(table.id);
+                            const p = palette(table.scope);
+                            return (
+                              <label key={table.id} className={`rounded-2xl border p-4 ${checked ? "border-cyan-400 bg-cyan-400/10" : "border-slate-800 bg-slate-950/50"}`}>
+                                <div className="flex items-start gap-3">
+                                  <input type="checkbox" checked={checked} onChange={() => toggleInList(table.id, setSelectedTableIds)} className="mt-1 h-4 w-4" />
+                                  <div className="min-w-0">
+                                    <p className="truncate text-sm font-semibold uppercase tracking-[0.2em]" style={{ color: p.color }}>{table.label}</p>
+                                    <p className="mt-1 text-xs text-slate-500">{table.schema}</p>
+                                    <p className="mt-3 text-[11px] text-slate-400">{table.columns.length} colunas</p>
+                                  </div>
+                                </div>
+                              </label>
+                            );
+                          })}
+                        </div>
+                      </section>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
   );
 }
