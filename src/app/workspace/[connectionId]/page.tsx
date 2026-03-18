@@ -23,6 +23,11 @@ export default async function WorkspacePage({
   const activeTab = resolvedSearchParams?.tab ?? "editor";
   const isDiagramTab = activeTab === "diagram";
 
+  // Modo diagrama: renderiza direto, sem wrappers que reduzem o espaço
+  if (isDiagramTab) {
+    return <DiagramScopeView connectionId={connectionId} />;
+  }
+
   return (
     <div className="space-y-6">
       <div className="flex flex-wrap gap-3">
@@ -42,7 +47,7 @@ export default async function WorkspacePage({
       </div>
 
       <section
-        className={`rounded-2xl border border-slate-900 bg-slate-950/60 ${isDiagramTab ? "p-2 md:p-3" : "p-6"}`}
+        className="rounded-2xl border border-slate-900 bg-slate-950/60 p-6"
       >
         {activeTab === "editor" && (
           <div className="space-y-4">
@@ -66,8 +71,6 @@ export default async function WorkspacePage({
             </ul>
           </div>
         )}
-
-        {activeTab === "diagram" && <DiagramScopeView connectionId={connectionId} />}
 
         {activeTab === "admin" && (
           <div className="space-y-4">

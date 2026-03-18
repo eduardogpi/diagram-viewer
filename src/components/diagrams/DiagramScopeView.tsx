@@ -10,6 +10,7 @@ import ReactFlow, {
   MiniMap,
   Panel,
   Position,
+  useNodesState,
   type Edge,
   type EdgeMouseHandler,
   type Node,
@@ -505,6 +506,9 @@ export default function DiagramScopeView({ connectionId }: Props) {
   const [selectedScopeIds, setSelectedScopeIds] = useState<string[]>([]);
   const [selectedTableIds, setSelectedTableIds] = useState<string[]>([]);
 
+  // Estado de nós com suporte a drag nativo do ReactFlow
+  const [rfNodes, setRfNodes, onNodesChange] = useNodesState<NodeData>([]);
+
   useEffect(() => {
     let cancelled = false;
     async function load() {
@@ -581,6 +585,11 @@ export default function DiagramScopeView({ connectionId }: Props) {
     );
   }, [payload?.edges, visibleTables]);
 
+  // Sincroniza layout calculado → estado arrastável (preserva posições customizadas por filtro)
+  useEffect(() => {
+    setRfNodes(nodes);
+  }, [nodes, setRfNodes]);
+
   const edges = useMemo(() => {
     const allowed = new Set(nodes.map((n) => n.id));
     return (payload?.edges ?? [])
@@ -620,67 +629,65 @@ export default function DiagramScopeView({ connectionId }: Props) {
 
   return (
     <>
-      <div className="space-y-4">
-        {/* Toolbar */}
-        <div className="flex flex-wrap items-start justify-between gap-4 rounded-3xl border border-slate-900 bg-slate-950/70 px-5 py-4">
-          <div>
-            <p className="text-xs uppercase tracking-[0.4em] text-slate-500">Canvas do diagrama</p>
-            <h3 className="text-xl font-semibold text-slate-100">Fluxos relacionais por escopo</h3>
-            <p className="mt-1 text-sm text-slate-400">Visualize e filtre tabelas por escopo e relações entre elas.</p>
+      {/* Canvas ocupa quase toda a tela */}
+      <div className="relative h-[calc(100vh-49px)] w-full overflow-hidden bg-slate-950/60">
+
+        {/* Toolbar flutuante sobre o canvas */}
+        <div className="absolute inset-x-0 top-0 z-20 flex flex-wrap items-center justify-between gap-3 border-b border-white/[0.06] bg-slate-950/80 px-5 py-3 backdrop-blur-md">
+          <div className="flex items-center gap-3">
+            <h3 className="text-sm font-semibold text-slate-100">Fluxos relacionais por escopo</h3>
+            <div className="rounded-lg border border-slate-800/60 bg-slate-900/80 px-3 py-1 text-xs text-slate-400">
+              {status === "loading" ? "Carregando..." : `${visibleTables.length} tabelas · ${edges.length} relações`}
+            </div>
           </div>
-          <div className="flex flex-wrap items-center gap-3">
+          <div className="flex flex-wrap items-center gap-2">
             <button
               onClick={() => setShowFilters(true)}
-              className="rounded-xl bg-cyan-400 px-4 py-2 text-sm font-semibold text-slate-950 hover:bg-cyan-300 transition-colors"
+              className="rounded-xl bg-cyan-400 px-4 py-1.5 text-xs font-semibold text-slate-950 hover:bg-cyan-300 transition-colors"
             >
               {hasActiveFilters ? "✦ Filtros ativos" : "Abrir filtros"}
             </button>
             {hasActiveFilters && (
               <button
                 onClick={clearFilters}
-                className="rounded-xl border border-slate-700 bg-slate-900/80 px-4 py-2 text-sm text-slate-200 hover:border-slate-500 transition-colors"
+                className="rounded-xl border border-slate-700 bg-slate-900/80 px-4 py-1.5 text-xs text-slate-200 hover:border-slate-500 transition-colors"
               >
                 Limpar filtros
               </button>
             )}
-            <div className="rounded-xl border border-slate-800/60 bg-slate-900/80 px-4 py-2 text-sm text-slate-300">
-              {status === "loading" ? "Carregando..." : `${visibleTables.length} tabelas · ${edges.length} relações`}
-            </div>
           </div>
         </div>
 
         {status === "error" && (
-          <div className="rounded-2xl border border-red-900/50 bg-red-950/30 p-4 text-sm text-red-200">
+          <div className="absolute inset-x-4 top-16 z-10 rounded-2xl border border-red-900/50 bg-red-950/30 p-4 text-sm text-red-200">
             Não foi possível carregar o diagrama desta conexão.
           </div>
         )}
-
-        {/* Canvas */}
-        <div className="relative h-[calc(100vh-120px)] min-h-[820px] overflow-hidden rounded-[2rem] border border-slate-900 bg-slate-950/60">
-          {status === "loading" && (
-            <div className="flex h-full items-center justify-center text-sm text-slate-400">
+        {status === "loading" && (
+            <div className="flex h-full items-center justify-center text-sm text-slate-400 pt-12">
               Montando diagrama...
             </div>
           )}
-          {status !== "loading" && nodes.length === 0 && (
-            <div className="flex h-full flex-col items-center justify-center gap-2 text-sm text-slate-400">
+          {status !== "loading" && rfNodes.length === 0 && (
+            <div className="flex h-full flex-col items-center justify-center gap-2 text-sm text-slate-400 pt-12">
               <p>Nenhuma tabela encontrada com os filtros atuais.</p>
               <p>Abra os filtros e selecione outros escopos ou tabelas.</p>
             </div>
           )}
-          {nodes.length > 0 && (
+          {rfNodes.length > 0 && (
             <ReactFlow
-              nodes={nodes}
+              nodes={rfNodes}
               edges={edges}
+              onNodesChange={onNodesChange}
               onEdgeClick={((_e, edge) => setSelectedEdgeId(edge.id)) as EdgeMouseHandler}
               onPaneClick={() => setSelectedEdgeId(null)}
               fitView
               fitViewOptions={{ padding: 0.06, includeHiddenNodes: false }}
-              minZoom={0.25}
+              minZoom={0.15}
               maxZoom={2.4}
               nodesDraggable={true}
               nodesConnectable={false}
-              elementsSelectable={false}
+              elementsSelectable={true}
               proOptions={{ hideAttribution: true }}
               nodeTypes={nodeTypes}
             >
@@ -721,7 +728,6 @@ export default function DiagramScopeView({ connectionId }: Props) {
               )}
             </ReactFlow>
           )}
-        </div>
       </div>
 
       {showFilters && (

@@ -28,11 +28,15 @@ const demoConnections: Record<string, ConnectionMeta> = {
 export default async function WorkspaceLayout({
   children,
   params,
+  searchParams,
 }: {
   children: React.ReactNode;
   params: Promise<{ connectionId: string }>;
+  searchParams?: Promise<{ tab?: string }>;
 }) {
   const { connectionId } = await params;
+  const sp = searchParams ? await searchParams : {};
+  const isDiagram = (sp as { tab?: string }).tab === "diagram";
   const connection = demoConnections[connectionId] ?? {
     name: connectionId,
     provider: "Desconhecido",
@@ -41,9 +45,30 @@ export default async function WorkspaceLayout({
     status: "Indefinido",
   };
 
+  if (isDiagram) {
+    return (
+      <div className="min-h-screen bg-slate-950 text-slate-100">
+        {/* Barra superior compacta */}
+        <div className="flex items-center gap-3 border-b border-slate-800 bg-slate-950/90 px-6 py-3 backdrop-blur-md">
+          <nav className="text-sm text-slate-500">
+            <Link className="hover:text-cyan-300" href="/">Workspaces</Link>
+            <span className="px-2 text-slate-600">/</span>
+            <span className="text-slate-300">{connection.name}</span>
+          </nav>
+          <span className="text-slate-700">·</span>
+          <span className="rounded-full bg-emerald-500/10 px-3 py-1 text-xs font-medium text-emerald-300">
+            {connection.status}
+          </span>
+        </div>
+        {/* Canvas ocupa todo o restante */}
+        <div className="w-full">{children}</div>
+      </div>
+    );
+  }
+
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100">
-      <div className="mx-auto flex max-w-6xl flex-col px-6 py-10">
+      <div className="mx-auto flex w-full flex-col px-6 py-10">
         <nav className="text-sm text-slate-500">
           <Link className="hover:text-cyan-300" href="/">
             Workspaces
@@ -54,10 +79,10 @@ export default async function WorkspaceLayout({
 
         <header className="mt-6 flex flex-col gap-4 border-b border-slate-800 pb-6 lg:flex-row lg:items-center lg:justify-between">
           <div>
-            <p className="text-xs uppercase tracking-[0.4em] text-slate-500">
+            <p className="text-lg uppercase tracking-[0.4em] text-slate-500">
               {connection.provider}
             </p>
-            <h1 className="text-3xl font-semibold">{connection.name}</h1>
+            <h1 className="text-lg font-semibold">{connection.name}</h1>
             <p className="text-sm text-slate-400">{connection.host}</p>
           </div>
           <div className="flex flex-wrap gap-2">
