@@ -1,12 +1,14 @@
-import Link from "next/link";
-
 import DiagramScopeView from "@/components/diagrams/DiagramScopeView";
+import SqlEditorWorkbench from "@/components/sql/SqlEditorWorkbench";
+import WorkspaceTabs from "@/components/workspace/WorkspaceTabs";
+import { requireCurrentUserId } from "@/lib/auth/session";
+import { getWorkspaceConnectionForUser, getWorkspacePreference } from "@/lib/services/workspace";
 
 const tabs = [
-  { id: "editor", label: "Editor SQL", description: "Autocomplete, histórico e múltiplas abas" },
-  { id: "explorer", label: "Explorer", description: "Schemas, tabelas e dados" },
-  { id: "diagram", label: "Diagramas", description: "Layout por escopo com React Flow" },
-  { id: "admin", label: "Admin", description: "Usuários, índices, backups" },
+  { id: "editor", label: "Editor SQL", description: "Consultas, snippets e historico operacional." },
+  { id: "explorer", label: "Explorer", description: "Navegacao de schema, tabelas e relacionamentos." },
+  { id: "diagram", label: "Diagramas", description: "Visao relacional e filtros por escopo." },
+  { id: "admin", label: "Admin", description: "Auditoria, jobs e saude operacional." },
 ];
 
 type WorkspacePageProps = {
@@ -14,75 +16,99 @@ type WorkspacePageProps = {
   searchParams: Promise<{ tab?: string }>;
 };
 
-export default async function WorkspacePage({
-  params,
-  searchParams,
-}: WorkspacePageProps) {
-  const { connectionId } = await params;
-  const resolvedSearchParams = await searchParams;
-  const activeTab = resolvedSearchParams?.tab ?? "editor";
-  const isDiagramTab = activeTab === "diagram";
+function Placeholder({
+  eyebrow,
+  title,
+  description,
+  items,
+}: {
+  eyebrow: string;
+  title: string;
+  description: string;
+  items: string[];
+}) {
+  return (
+    <div className="space-y-5 rounded-2xl border border-slate-900 bg-slate-950/60 p-6">
+      <div>
+        <p className="text-xs uppercase tracking-[0.3em] text-slate-500">{eyebrow}</p>
+        <h2 className="mt-2 text-lg font-semibold text-slate-100">{title}</h2>
+        <p className="mt-2 text-sm text-slate-400">{description}</p>
+      </div>
+      <div className="grid gap-3 md:grid-cols-2">
+        {items.map((item) => (
+          <div key={item} className="rounded-xl border border-slate-800 bg-slate-900/70 p-4 text-sm text-slate-300">
+            {item}
+          </div>
+        ))}
+      </div>
+      <div className="rounded-xl border border-dashed border-slate-800 p-4 text-sm text-slate-500">
+        Modulo preparado para receber implementacao funcional nas proximas fases, ja conectado ao workspace real.
+      </div>
+    </div>
+  );
+}
 
-  // Modo diagrama: renderiza direto, sem wrappers que reduzem o espaço
-  if (isDiagramTab) {
+export default async function WorkspacePage({ params, searchParams }: WorkspacePageProps) {
+  const { connectionId } = await params;
+  const userId = await requireCurrentUserId();
+  const connection = await getWorkspaceConnectionForUser(connectionId, userId);
+  const preference = await getWorkspacePreference(userId, connectionId);
+  const resolvedSearchParams = await searchParams;
+  const activeTab = resolvedSearchParams?.tab ?? preference.favoriteTabs[0] ?? "editor";
+
+  if (!connection) {
+    return null;
+  }
+
+  if (activeTab === "diagram") {
     return <DiagramScopeView connectionId={connectionId} />;
   }
 
   return (
     <div className="space-y-6">
-      <div className="flex flex-wrap gap-3">
-        {tabs.map((tab) => (
-          <Link
-            key={tab.id}
-            href={`/workspace/${connectionId}?tab=${tab.id}`}
-            className={`rounded-xl border px-4 py-2 text-sm transition ${
-              activeTab === tab.id
-                ? "border-cyan-400 bg-cyan-400/10 text-cyan-200"
-                : "border-slate-800 text-slate-400 hover:border-slate-600 hover:text-slate-200"
-            }`}
-          >
-            {tab.label}
-          </Link>
-        ))}
-      </div>
+      <WorkspaceTabs
+        connectionId={connectionId}
+        activeTab={activeTab}
+        favoriteTab={preference.favoriteTabs[0] ?? null}
+        tabs={tabs}
+      />
 
-      <section
-        className="rounded-2xl border border-slate-900 bg-slate-950/60 p-6"
-      >
-        {activeTab === "editor" && (
-          <div className="space-y-4">
-            <h2 className="text-lg font-semibold text-slate-100">Editor SQL</h2>
-            <p className="text-sm text-slate-400">
-              Monaco Editor com snippets, autocomplete baseado no schema e histórico sincronizado.
-            </p>
-            <div className="rounded-xl border border-cyan-900/40 bg-slate-900/80 p-4 font-mono text-sm text-cyan-200">
-              <p>SELECT * FROM pedidos WHERE status = &lsquo;PENDENTE&rsquo; ORDER BY atualizado_em DESC;</p>
-            </div>
-          </div>
-        )}
+      {activeTab === "editor" ? (
+        <SqlEditorWorkbench
+          connectionId={connectionId}
+          connectionName={connection.name}
+          databaseName={connection.database}
+          provider={connection.provider}
+        />
+      ) : null}
 
-        {activeTab === "explorer" && (
-          <div className="space-y-4">
-            <h2 className="text-lg font-semibold text-slate-100">Schema Explorer</h2>
-            <ul className="space-y-2 text-sm text-slate-300">
-              <li>• Tabelas com filtros e busca incremental</li>
-              <li>• Data grid virtualizado (TanStack) com edição inline</li>
-              <li>• Acesso rápido a FKs e dados relacionados</li>
-            </ul>
-          </div>
-        )}
+      {activeTab === "explorer" ? (
+        <Placeholder
+          eyebrow="Workspace / Explorer"
+          title="Explorer preparado para dados reais"
+          description="A navegacao do workspace agora ja sustenta um explorer conectado ao metadata real da conexao."
+          items={[
+            "Area reservada para schemas, tabelas e colunas.",
+            "Estado vazio padronizado para listas e detalhes.",
+            "Espaco para busca incremental e atalhos por schema.",
+            "Integracao natural com diagrama e editor nas proximas fases.",
+          ]}
+        />
+      ) : null}
 
-        {activeTab === "admin" && (
-          <div className="space-y-4">
-            <h2 className="text-lg font-semibold text-slate-100">Administração</h2>
-            <ul className="space-y-2 text-sm text-slate-300">
-              <li>• Gestão de usuários/roles com templates de permissões</li>
-              <li>• Monitor com locks, sessões ativas e métricas de performance</li>
-              <li>• Job center para backups lógicos e manutenção</li>
-            </ul>
-          </div>
-        )}
-      </section>
+      {activeTab === "admin" ? (
+        <Placeholder
+          eyebrow="Workspace / Admin"
+          title="Admin integrado ao contexto da conexao"
+          description="O modulo administrativo agora ja nasce dentro de uma shell consistente, com espaco para auditoria e operacoes reais."
+          items={[
+            "Bloco para auditoria operacional da conexao.",
+            "Espaco para jobs e tarefas futuras.",
+            "Area para status de manutencao e eventos recentes.",
+            "Base pronta para controles por usuario e permissoes.",
+          ]}
+        />
+      ) : null}
     </div>
   );
 }

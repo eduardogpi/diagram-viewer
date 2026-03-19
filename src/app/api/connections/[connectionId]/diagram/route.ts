@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 
-import { prisma } from "@/lib/prisma";
+import { requireCurrentUserId } from "@/lib/auth/session";
+import { errorResponse } from "@/lib/errors";
+import { findConnectionForUser } from "@/lib/services/connections";
 import { buildMySqlDiagram } from "@/lib/services/mysql-diagram";
 import type { DiagramResponse } from "@/lib/types/diagram";
 
@@ -8,22 +10,20 @@ export async function GET(
   _req: NextRequest,
   { params }: { params: Promise<{ connectionId: string }> }
 ): Promise<NextResponse<DiagramResponse | { error: string }>> {
-  const { connectionId } = await params;
-
-  const connection = await prisma.connection.findUnique({
-    where: { id: connectionId },
-    include: { secret: true },
-  });
-
-  if (!connection) {
-    return NextResponse.json({ error: "Conexão não encontrada" }, { status: 404 });
-  }
-
-  if (!connection.secret) {
-    return NextResponse.json({ error: "Nenhum segredo associado à conexão" }, { status: 422 });
-  }
-
   try {
+    const ownerId = await requireCurrentUserId();
+    const { connectionId } = await params;
+
+    const connection = await findConnectionForUser(connectionId, ownerId);
+
+    if (!connection) {
+      return NextResponse.json({ error: "Conexão não encontrada" }, { status: 404 });
+    }
+
+    if (!connection.secret) {
+      return NextResponse.json({ error: "Nenhum segredo associado à conexão" }, { status: 422 });
+    }
+
     const payload = await buildMySqlDiagram({
       host: connection.host,
       port: connection.port,
@@ -34,7 +34,10 @@ export async function GET(
 
     return NextResponse.json(payload, { headers: { "cache-control": "no-store" } });
   } catch (error) {
-    console.error("Falha ao montar diagrama", error);
-    return NextResponse.json({ error: "Falha ao carregar diagrama" }, { status: 500 });
+    if (error instanceof Error && error.message === "SECRET_ENCRYPTION_KEY is not set") {
+      return NextResponse.json({ error: "SECRET_ENCRYPTION_KEY não configurada" }, { status: 500 });
+    }
+
+    return errorResponse(error, "Falha ao carregar diagrama");
   }
 }

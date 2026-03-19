@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const connectionProviders = ["MYSQL", "POSTGRES", "MSSQL", "ORACLE"] as const;
+export const connectionProviders = ["MYSQL"] as const;
 export type ConnectionProvider = (typeof connectionProviders)[number];
 
 export const connectionPayloadSchema = z.object({
