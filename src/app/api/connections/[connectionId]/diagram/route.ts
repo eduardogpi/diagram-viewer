@@ -1,9 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 
 import { requireCurrentUserId } from "@/lib/auth/session";
+import { requireDriver, toDriverConfig } from "@/lib/db/drivers";
 import { errorResponse } from "@/lib/errors";
 import { findConnectionForUser } from "@/lib/services/connections";
-import { buildMySqlDiagram } from "@/lib/services/mysql-diagram";
 import type { DiagramResponse } from "@/lib/types/diagram";
 
 export async function GET(
@@ -24,13 +24,8 @@ export async function GET(
       return NextResponse.json({ error: "Nenhum segredo associado à conexão" }, { status: 422 });
     }
 
-    const payload = await buildMySqlDiagram({
-      host: connection.host,
-      port: connection.port,
-      username: connection.username,
-      database: connection.database,
-      cipherText: connection.secret.cipherText,
-    });
+    const driver = requireDriver(connection.provider);
+    const payload = await driver.buildDiagram(toDriverConfig(connection));
 
     return NextResponse.json(payload, { headers: { "cache-control": "no-store" } });
   } catch (error) {

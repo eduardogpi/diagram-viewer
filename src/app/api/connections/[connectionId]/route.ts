@@ -60,6 +60,32 @@ export async function DELETE(
     }
 
     await prisma.$transaction(async (tx) => {
+      // Nenhuma dessas relações tem cascade no schema, então cada uma precisa ser
+      // limpa explicitamente antes de apagar a conexão (senão o delete falha por FK).
+      const packages = await tx.migrationPackage.findMany({
+        where: { connectionId: connection.id },
+        select: { id: true },
+      });
+      const packageIds = packages.map((p) => p.id);
+      if (packageIds.length > 0) {
+        await tx.migrationSnapshotRow.deleteMany({ where: { packageId: { in: packageIds } } });
+        await tx.migrationFile.deleteMany({ where: { packageId: { in: packageIds } } });
+        await tx.migrationPackage.deleteMany({ where: { id: { in: packageIds } } });
+      }
+
+      const sessions = await tx.aiModelingSession.findMany({
+        where: { connectionId: connection.id },
+        select: { id: true },
+      });
+      const sessionIds = sessions.map((s) => s.id);
+      if (sessionIds.length > 0) {
+        await tx.aiModelingTurn.deleteMany({ where: { sessionId: { in: sessionIds } } });
+        await tx.aiModelingSession.deleteMany({ where: { id: { in: sessionIds } } });
+      }
+
+      await tx.workspacePreference.deleteMany({ where: { connectionId: connection.id } });
+      await tx.layoutSnapshot.deleteMany({ where: { connectionId: connection.id } });
+
       await tx.auditLog.updateMany({
         where: { connectionId: connection.id },
         data: { connectionId: null },

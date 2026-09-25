@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 
 import { requireCurrentUserId } from "@/lib/auth/session";
 import { encryptSecret } from "@/lib/crypto";
-import { testMySQLConnection } from "@/lib/db/mysql";
+import { findDriver } from "@/lib/db/drivers";
 import { errorResponse, HttpError } from "@/lib/errors";
 import { prisma } from "@/lib/prisma";
 import { parseConnectionHealth, parseTagsJson, serializeConnectionHealth, serializeTags } from "@/lib/serializers/connection";
@@ -17,20 +17,24 @@ async function ensureConnectionWorks(payload: {
   username: string;
   password: string;
   database: string;
+  schema?: string;
 }) {
-  switch (payload.provider) {
-    case "MYSQL":
-      await testMySQLConnection({
-        host: payload.host,
-        port: payload.port,
-        user: payload.username,
-        password: payload.password,
-        database: payload.database,
-      });
-      return;
-    default:
-      throw new HttpError(400, `Provider ${payload.provider} ainda não suportado para teste automático.`);
+  // MIGRATIONS não tem banco real por trás — nada a testar.
+  if (payload.provider === "MIGRATIONS") return;
+
+  const driver = findDriver(payload.provider);
+  if (!driver) {
+    throw new HttpError(400, `Provider ${payload.provider} ainda não suportado para teste automático.`);
   }
+
+  await driver.testConnection({
+    host: payload.host,
+    port: payload.port,
+    username: payload.username,
+    password: payload.password,
+    database: payload.database,
+    schema: payload.schema ?? null,
+  });
 }
 
 export async function GET() {
@@ -82,6 +86,8 @@ export async function POST(req: NextRequest) {
           host: payload.host,
           port: payload.port,
           database: payload.database,
+          // Só faz sentido para providers que separam database de schema.
+          schema: findDriver(payload.provider)?.schemaField ? (payload.schema ?? null) : null,
           username: payload.username,
           tagsJson: serializeTags(payload.tags),
           ownerId,
@@ -94,6 +100,7 @@ export async function POST(req: NextRequest) {
           host: true,
           port: true,
           database: true,
+          schema: true,
           username: true,
           tagsJson: true,
           secret: {
@@ -120,6 +127,7 @@ export async function POST(req: NextRequest) {
         host: connection.host,
         port: connection.port,
         database: connection.database,
+        schema: connection.schema,
         username: connection.username,
         tags: parseTagsJson(connection.tagsJson),
         health: parseConnectionHealth(connection.secret?.metadata),

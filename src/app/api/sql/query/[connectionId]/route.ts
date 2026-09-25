@@ -1,9 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
 
 import { requireCurrentUserId } from "@/lib/auth/session";
+import { requireDriver, toDriverConfig } from "@/lib/db/drivers";
 import { errorResponse, HttpError } from "@/lib/errors";
+import { withTracing } from "@/lib/observability";
 import { findConnectionForUser } from "@/lib/services/connections";
-import { executeReadOnlyMySqlQuery } from "@/lib/services/mysql-query";
 import { listSqlQueryHistory, logConnectionAudit } from "@/lib/services/workspace";
 
 export async function GET(
@@ -45,16 +46,19 @@ export async function POST(
       throw new HttpError(422, "Nenhum segredo associado a conexao.");
     }
 
+    const driver = requireDriver(connection.provider);
+
     body = (await req.json()) as { sql?: string; rowLimit?: number };
-    const result = await executeReadOnlyMySqlQuery({
-      host: connection.host,
-      port: connection.port,
-      username: connection.username,
-      database: connection.database,
-      cipherText: connection.secret.cipherText,
-      sql: body.sql ?? "",
-      rowLimit: typeof body.rowLimit === "number" ? body.rowLimit : 200,
-    });
+    const result = await withTracing(
+      "sql.query",
+      () =>
+        driver.executeReadOnlyQuery({
+          ...toDriverConfig(connection),
+          sql: body.sql ?? "",
+          rowLimit: typeof body.rowLimit === "number" ? body.rowLimit : 200,
+        }),
+      { provider: connection.provider }
+    );
 
     await logConnectionAudit({
       action: "SQL_QUERY_SUCCEEDED",

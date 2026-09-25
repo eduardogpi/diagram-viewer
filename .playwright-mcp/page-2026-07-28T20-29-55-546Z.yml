@@ -1,0 +1,73 @@
+- generic [active] [ref=f7e1]:
+  - generic [ref=f7e3]:
+    - navigation [ref=f7e4]:
+      - link "Workspaces" [ref=f7e5] [cursor=pointer]:
+        - /url: /
+      - text: /Modules Test/editor
+    - banner [ref=f7e6]:
+      - generic [ref=f7e7]:
+        - paragraph [ref=f7e8]: MIGRATIONS
+        - heading "Modules Test" [level=1] [ref=f7e9]
+        - paragraph [ref=f7e10]: (migrations):0 · Modules Test
+      - generic [ref=f7e11]:
+        - generic [ref=f7e12]: migrations
+        - generic [ref=f7e13]: Online
+    - generic [ref=f7e14]:
+      - generic [ref=f7e16]:
+        - generic [ref=f7e17]:
+          - generic [ref=f7e18]:
+            - link "Editor SQL" [ref=f7e19] [cursor=pointer]:
+              - /url: /workspace/cms53yym000de40goxtn5vplj?tab=editor
+            - link "Explorer" [ref=f7e20] [cursor=pointer]:
+              - /url: /workspace/cms53yym000de40goxtn5vplj?tab=explorer
+            - link "Diagramas" [ref=f7e21] [cursor=pointer]:
+              - /url: /workspace/cms53yym000de40goxtn5vplj?tab=diagram
+            - link "Migrations" [ref=f7e22] [cursor=pointer]:
+              - /url: /workspace/cms53yym000de40goxtn5vplj?tab=migrations
+            - link "Admin" [ref=f7e23] [cursor=pointer]:
+              - /url: /workspace/cms53yym000de40goxtn5vplj?tab=admin
+          - button "Marcar aba atual como favorita" [ref=f7e25]
+        - generic [ref=f7e26]:
+          - generic [ref=f7e27]:
+            - generic [ref=f7e28]:
+              - paragraph [ref=f7e29]: Workspace / Migrations
+              - heading "Importar migrations e gerar diagramas" [level=2] [ref=f7e30]
+              - paragraph [ref=f7e31]: Envie arquivos .sql de migrations (Flyway, golang-migrate, SQL puro) e o sistema reconstrói o schema e gera diagramas por snapshot.
+            - generic [ref=f7e32]:
+              - generic [ref=f7e33]:
+                - generic [ref=f7e34]:
+                  - text: Nome do package
+                  - 'textbox "Ex: Spring Petclinic migrations" [ref=f7e35]'
+                - generic [ref=f7e36]:
+                  - button "Selecionar arquivos .sql" [ref=f7e37]
+                  - button "Importar" [disabled] [ref=f7e38]
+              - paragraph [ref=f7e39]: "Arraste arquivos .sql aqui ou clique em selecionar. Limite: 250 arquivos, 10MB total."
+          - generic [ref=f7e40]:
+            - generic [ref=f7e41]:
+              - heading "Packages importados" [level=3] [ref=f7e42]
+              - button "Atualizar" [ref=f7e43]
+            - paragraph [ref=f7e44]: Carregando...
+      - complementary [ref=f7e45]:
+        - generic [ref=f7e46]:
+          - heading "Resumo" [level=2] [ref=f7e47]
+          - generic [ref=f7e48]:
+            - generic [ref=f7e49]:
+              - term [ref=f7e50]: Host
+              - definition [ref=f7e51]: (migrations)
+            - generic [ref=f7e52]:
+              - term [ref=f7e53]: Usuário
+              - definition [ref=f7e54]: (migrations)
+            - generic [ref=f7e55]:
+              - term [ref=f7e56]: Database
+              - definition [ref=f7e57]: Modules Test
+            - generic [ref=f7e58]:
+              - term [ref=f7e59]: Último teste
+              - definition [ref=f7e60]: 28/07/2026, 17:28:36
+        - generic [ref=f7e61]:
+          - heading "Eventos recentes" [level=2] [ref=f7e62]
+          - generic [ref=f7e64]:
+            - paragraph [ref=f7e65]: MIGRATION_PROJECT_CREATED
+            - paragraph [ref=f7e66]: Modules Test (74 arquivos, flyway)
+            - paragraph [ref=f7e67]: 28/07/2026, 17:28:36
+  - button "Open Next.js Dev Tools" [ref=f7e73] [cursor=pointer]
+  - alert [ref=f7e77]

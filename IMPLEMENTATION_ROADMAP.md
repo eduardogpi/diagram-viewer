@@ -6,20 +6,25 @@ Este documento organiza a evolucao do produto em fases praticas, com checklist d
 
 Hoje o sistema ja possui:
 
-- cadastro de conexoes
-- persistencia basica com Prisma/SQLite
-- teste de conexao MySQL no cadastro
-- geracao de diagrama a partir de `INFORMATION_SCHEMA`
-- visualizacao do diagrama com React Flow
-- filtros visuais de escopo/tabela no diagrama
-- execucao SQL read-only no workspace com historico basico
+- identificacao/autenticacao por sessao (cookie/header) com isolamento por usuario
+- cadastro de conexoes com teste real de conexao (MySQL e PostgreSQL)
+- persistencia com Prisma/SQLite e segredos cifrados (AES-256-GCM)
+- geracao de diagrama a partir do catalogo do banco (introspeccao ao vivo)
+- visualizacao do diagrama com React Flow (filtros, layout, snapshots, export JSON)
+- execucao SQL read-only no workspace com historico por conexao
+- explorer de schema com colunas/indices, preview de dados e export de documentacao
+- importador de migrations (Flyway/SQL puro) com timeline de snapshots
+- modelagem de schema assistida por LLM (Gemini/OpenRouter/NVIDIA) com memoria de projeto
+- servidor MCP (stdio + HTTP) expondo a modelagem IA para agentes externos
+- persistencia de preferencias por usuario (aba favorita, minimapa, profundidade, filtros)
+- testes unitarios com vitest
 
 Hoje o sistema ainda tem partes que sao apenas menu, texto estatico ou placeholders:
 
-- `Explorer`
-- `Admin`
-- painel lateral de detalhes do workspace
-- botoes como `Atualizar schema` e `Ver historico de auditoria`
+- `Admin` (aba parcial: mostra resumo real da conexao e eventos de auditoria, mas sem usuarios/roles/jobs/locks/backup)
+- botao/fluxo de `Atualizar schema` acionavel pela UI
+- exportacao PNG/SVG e layout "force" no diagrama
+- comparacao entre ambientes e diff entre snapshots
 
 ---
 
@@ -29,33 +34,36 @@ Hoje o sistema ainda tem partes que sao apenas menu, texto estatico ou placehold
 
 - [x] Criar conexao via formulario
 - [x] Validar payload com Zod
-- [x] Testar conexao MySQL antes de salvar
-- [x] Persistir conexao e segredo no banco
-- [x] Listar conexoes na home
+- [x] Testar conexao antes de salvar (MySQL e PostgreSQL)
+- [x] Persistir conexao e segredo no banco (cifrado)
+- [x] Listar conexoes na home com busca/filtros/status real
 - [x] Abrir workspace por conexao
-- [x] Gerar diagrama real do schema MySQL
+- [x] Gerar diagrama real do schema do banco
 - [x] Renderizar diagrama com React Flow
 - [x] Filtrar diagrama por escopo e tabelas
 - [x] Executar consultas SQL read-only com resultado tabular
+- [x] Importar migrations e gerar diagramas por snapshot
+- [x] Modelagem de schema assistida por LLM
+- [x] Servidor MCP para agentes externos dirigirem sessoes de modelagem
 
 ### Funcionalidades com UX parcial ou tecnica incompleta
 
-- [ ] Controle de acesso por usuario
-- [ ] Seguranca forte para segredos
-- [ ] Suporte real a multiplos provedores
-- [ ] Dados reais no header/layout do workspace
-- [ ] Indicadores reais de ultimo acesso/status/checksum
-- [ ] Persistencia de preferencias do usuario
-- [ ] Persistencia de filtros/layout do diagrama
-- [ ] Testes automatizados
+- [x] Controle de acesso por usuario (sessao/cookie; provider de login completo ainda pode evoluir)
+- [x] Seguranca forte para segredos (AES-256-GCM + falha explicita sem chave)
+- [x] Suporte real a multiplos provedores (MySQL e PostgreSQL; MIGRATIONS sem banco)
+- [x] Dados reais no header/layout do workspace
+- [x] Indicadores reais de ultimo acesso/status/checksum
+- [x] Persistencia de preferencias do usuario
+- [x] Persistencia de filtros/layout do diagrama
+- [x] Testes automatizados (vitest)
 - [ ] Tratamento de encoding quebrado em textos PT-BR
 
 ### Funcionalidades que hoje sao so menu/placeholder
 
 - [x] Editor SQL funcional
-- [ ] Explorer de schema/tabelas/dados
-- [ ] Modulo administrativo
-- [ ] Historico/auditoria visivel na interface
+- [x] Explorer de schema/tabelas/dados
+- [ ] Modulo administrativo (apenas resumo + auditoria; sem usuarios/roles/jobs)
+- [x] Historico/auditoria visivel na interface (painel de eventos no Admin)
 - [ ] Atualizacao de schema acionavel pela UI
 
 ---
@@ -176,6 +184,15 @@ Observacao: nesta iteracao, a Fase 4 passou a persistir preferencias por usuario
 - [x] Adicionar minimapa e controles configuraveis por usuario
 - [ ] Permitir reorder/logica de layout: force
 - [x] Permitir reorder/logica de layout: dagre, LR, TB
+- [x] Criar FK manual por dois cliques no canvas (edge tracejada ambar, removivel)
+- [x] Reorganizar toolbar com agrupamento visual e separadores
+- [x] Padronizar idioma da UI para PT-BR
+- [x] Handles dos nos ajustaveis conforme direcao do layout (TB/LR)
+- [x] Extrair NodePanel e EdgePanel como sub-componentes
+- [x] Estado vazio do canvas com botao de limpar filtros
+- [x] Posicionamento dinamico dos panels via ResizeObserver na toolbar
+- [x] Toggle de vizinhos com reversao no NodePanel
+- [x] Botao de fechar no NodePanel
 
 ### Funcionalidades avancadas
 
@@ -190,34 +207,34 @@ Observacao: nesta iteracao, a Fase 4 passou a persistir preferencias por usuario
 
 Objetivo: implementar de verdade a aba que hoje e apenas descricao e query fixa.
 
-Status desta base: implementada parcialmente
+Status desta base: implementada (falta apenas separar consultas mutáveis, que continuam bloqueadas).
 
-Observacao: nesta iteracao, a Fase 5 ganhou executor MySQL read-only com timeout e limite de linhas, UI operacional no workspace, snippets iniciais, historico por conexao e resultado tabular real. Monaco, autocomplete, multiplas abas, favoritos e exportacoes seguem como proximos incrementos.
+Observacao: a Fase 5 ganhou executor read-only (MySQL e PostgreSQL) com timeout e limite de linhas, Monaco Editor com autocomplete por schema, multiplas abas, favoritos, formatacao, EXPLAIN, cancelamento, resultado paginado, export CSV/JSON, historico por conexao e integracao com o Explorer.
 
 ### Checklist
 
-- [ ] Integrar Monaco Editor
+- [x] Integrar Monaco Editor
 - [x] Criar executor de query no backend
 - [x] Implementar leitura segura com limites e timeout
 - [ ] Separar consultas read-only e operacoes mutaveis
-- [ ] Adicionar autocomplete baseado no schema carregado
-- [ ] Adicionar syntax highlight por provider
+- [x] Adicionar autocomplete baseado no schema carregado
+- [x] Adicionar syntax highlight por provider (Monaco, linguagem SQL)
 - [x] Adicionar historico de queries por conexao/usuario
-- [ ] Adicionar multiplas abas
-- [ ] Adicionar salvar consultas favoritas
+- [x] Adicionar multiplas abas
+- [x] Adicionar salvar consultas favoritas
 - [x] Adicionar parametros/snippets reutilizaveis
-- [ ] Adicionar formatacao SQL
-- [ ] Adicionar cancelamento de query longa
-- [ ] Adicionar resultado tabular paginado
-- [ ] Adicionar download CSV/JSON
-- [ ] Adicionar explain plan
+- [x] Adicionar formatacao SQL
+- [x] Adicionar cancelamento de query longa
+- [x] Adicionar resultado tabular paginado
+- [x] Adicionar download CSV/JSON
+- [x] Adicionar explain plan
 
 ### Criticos antes de liberar
 
 - [x] guardrails para query destrutiva
 - [ ] confirmacao para `UPDATE`, `DELETE`, `DROP`, `ALTER`
 - [x] trilha de auditoria
-- [ ] rate limit e timeout
+- [ ] rate limit e timeout (timeout existe; rate limit nao)
 
 ---
 
@@ -225,20 +242,22 @@ Observacao: nesta iteracao, a Fase 5 ganhou executor MySQL read-only com timeout
 
 Objetivo: transformar a aba Explorer em uma ferramenta de navegacao e inspecao real.
 
+Status desta base: implementada.
+
 ### Checklist
 
-- [ ] Listar schemas/tabelas reais da conexao
-- [ ] Adicionar busca incremental
-- [ ] Exibir colunas, tipos, PKs, FKs e indices
-- [ ] Adicionar painel de preview de dados
-- [ ] Adicionar pagina de detalhes da tabela
-- [ ] Adicionar navegacao para tabelas relacionadas
-- [ ] Adicionar filtros por schema
-- [ ] Adicionar contagem de linhas estimada
-- [ ] Adicionar estatisticas basicas da tabela
-- [ ] Adicionar copiar nome da tabela/coluna
-- [ ] Adicionar abrir tabela no editor SQL
-- [ ] Adicionar abrir tabela no diagrama
+- [x] Listar schemas/tabelas reais da conexao
+- [x] Adicionar busca incremental
+- [x] Exibir colunas, tipos, PKs, FKs e indices
+- [x] Adicionar painel de preview de dados
+- [x] Adicionar pagina de detalhes da tabela
+- [x] Adicionar navegacao para tabelas relacionadas
+- [x] Adicionar filtros por schema
+- [x] Adicionar contagem de linhas estimada
+- [x] Adicionar estatisticas basicas da tabela
+- [x] Adicionar copiar nome da tabela/coluna
+- [x] Adicionar abrir tabela no editor SQL
+- [x] Adicionar abrir tabela no diagrama
 
 ### Funcionalidades avancadas
 
@@ -251,6 +270,8 @@ Objetivo: transformar a aba Explorer em uma ferramenta de navegacao e inspecao r
 ## Fase 7 - Admin
 
 Objetivo: substituir a aba administrativa estaticamente descrita por operacoes reais.
+
+Status desta base: parcial. A aba Admin ja mostra dados reais da conexao (host/porta/database/usuario/status) e um painel de eventos recentes de auditoria (`listRecentConnectionEvents`), mas nenhum item abaixo esta implementado.
 
 ### Checklist
 
@@ -300,17 +321,21 @@ Observacao: parte desta fase ja foi antecipada nas Fases 3 e 4, com persistencia
 
 Objetivo: reduzir risco de regressao e melhorar operacao.
 
+Status desta base: implementada (falta apenas E2E).
+
+Observacao: logging estruturado com pino, metricas/tracing basicos (duracao por operacao), CI (lint/typecheck/test), testes de integracao das rotas de API, fixture de schema e smoke test do diagrama.
+
 ### Checklist
 
-- [ ] Configurar testes unitarios
-- [ ] Configurar testes de integracao para API
+- [x] Configurar testes unitarios (vitest)
+- [x] Configurar testes de integracao para API
 - [ ] Configurar testes E2E para fluxos principais
-- [ ] Configurar lint e typecheck no CI
-- [ ] Adicionar logging estruturado
-- [ ] Adicionar metricas de uso e erros
-- [ ] Adicionar tracing basico nas rotas criticas
-- [ ] Criar fixture local para schema MySQL de teste
-- [ ] Criar smoke test para montar diagrama
+- [x] Configurar lint e typecheck no CI (`.github/workflows/ci.yml`)
+- [x] Adicionar logging estruturado (pino)
+- [x] Adicionar metricas de uso e erros (`recordMetric`)
+- [x] Adicionar tracing basico nas rotas criticas (`withTracing`)
+- [x] Criar fixture local para schema de teste
+- [x] Criar smoke test para montar diagrama
 
 ---
 
@@ -318,34 +343,108 @@ Objetivo: reduzir risco de regressao e melhorar operacao.
 
 Objetivo: evoluir de ferramenta tecnica para produto mais completo.
 
+Status desta base: parcial.
+
 ### Checklist
 
-- [ ] onboarding para primeira conexao
-- [ ] templates de conexao
-- [ ] pagina de ajuda/atalhos
-- [ ] favoritos/recentes
+- [x] onboarding para primeira conexao
+- [x] templates de conexao
+- [x] pagina de ajuda/atalhos (`/help`)
+- [ ] favoritos/recentes de conexoes
 - [ ] compartilhamento de layouts
-- [ ] exportacao de documentacao de schema
+- [x] exportacao de documentacao de schema (Markdown via Explorer)
 - [ ] comparacao entre ambientes
 - [ ] IA para explicar schema e sugerir joins
-- [ ] geracao de documentacao automatica por dominio
+- [ ] geracao de documentacao automatica por dominio (hoje agrupa por schema)
+
+---
+
+## Fase 11 - Integração MCP (AI Modeling)
+
+Objetivo: expor o modulo de Modelagem IA como servidor MCP, permitindo que agentes externos (Claude Code, Codex, Devin) dirijam sessoes de modelagem compartilhadas com a UI.
+
+Status desta base: implementada
+
+### Checklist
+
+- [x] Servidor MCP stdio (`src/mcp/server.ts`, script `npm run mcp`)
+- [x] Tools de conexao: `list_connections`, `use_connection` (sticky)
+- [x] Tools de sessao: `modeling_list_sessions`, `modeling_create_session`, `use_session`, `modeling_get_session`, `modeling_get_diagram`, `modeling_delete_session`
+- [x] Tool de turno: `modeling_send_message` (LLM da sessao) com diff de tabelas na resposta
+- [x] Tool de operacoes diretas: `modeling_apply_ops` — o agente analisa e a sessao so persiste, sem chamar a LLM
+- [x] Tools auxiliares: `modeling_revert`, `modeling_export_sql`, `modeling_status`
+- [x] Selecao de conexao: explicita, sticky, `MCP_CONNECTION_ID` e allowlist `MCP_ALLOWED_CONNECTIONS`
+- [x] Resolucao de usuario via `MCP_USER_ID` (fallback: dono da conexao mais recente)
+- [x] Sincronizacao em tempo real da UI (polling de sessao aberta e lista de sessoes)
+- [x] Documentacao de configuracao no README
+
+### Proximas evolucoes
+
+- [x] Transporte HTTP (Streamable HTTP) para agentes remotos como Devin, com autenticacao por token
+- [x] Tags de ambiente (dev/homolog/prod) com restricoes por ambiente
+- [x] Estado sticky isolado por sessao MCP (stdio vs cada cliente HTTP)
+- [x] `modeling_export_sql` com opcao de salvar como package de migrations
+- [x] `modeling_set_memory` para ligar/desligar memoria e apontar o projeto do CodeGraph
+- [x] Edicao humana no canvas (inspector + POST /ops), mesmo historico da conversa
+- [x] Operacao `alterColumn` (tipo / nullability / PK) no motor, na LLM e no MCP
+- [ ] Substituir polling por SSE/WebSocket
+
+---
+
+## Fase 12 - Importador de Migrations
+
+Objetivo: receber uma pasta de migrations (foco Flyway/SQL puro), reconstruir o schema aplicando-as em ordem e gerar diagramas ER por snapshot. Detalhes em `MIGRATIONS_ROADMAP.md`.
+
+Status desta base: implementada.
+
+### Checklist
+
+- [x] Upload de arquivos de migrations via UI (`/api/migrations/import`, `/api/migrations/[connectionId]/upload`)
+- [x] Parser de SQL puro (CREATE/ALTER/DROP TABLE, FKs) reutilizando o DTO `DiagramResponse`
+- [x] Aplicar migrations em ordem e gerar snapshot por migration (`MigrationSnapshotRow`)
+- [x] Timeline navegavel entre snapshots
+- [x] Estado final do schema como diagrama
+- [x] Aba `Migrations` no workspace e provider `MIGRATIONS` (sem banco real)
+- [x] Adicionar migration a um package existente (`/append`)
+- [x] Salvar modelagem IA como package de migrations
+- [ ] Diff entre dois snapshots de schema
+- [ ] Parser de migrations Laravel/Rails/Django
+- [ ] Liquibase XML/YAML
+
+---
+
+## Fase 13 - Modelagem IA (Workbench)
+
+Objetivo: desenhar e alterar o schema conversando com uma LLM, sem depender de banco ativo, com edicao humana no mesmo historico.
+
+Status desta base: implementada.
+
+### Checklist
+
+- [x] Sessoes de modelagem por conexao (criar/listar/remover)
+- [x] Chat com streaming de resposta e aplicacao de operacoes de schema
+- [x] Multiplo provedor LLM por sessao (Gemini/OpenRouter/NVIDIA) com troca de modelo
+- [x] Botao de atualizar lista de modelos das APIs disponiveis (forca refresh do cache)
+- [x] Editor manual de schema (inspector) entrando no mesmo historico da conversa
+- [x] Checkpoints e revert para um turno anterior
+- [x] Exportar SQL (MySQL/PostgreSQL) e salvar como package de migrations
+- [x] Memoria de projeto (CodeGraph) por sessao
+- [x] Sincronizacao em tempo real entre UI e agentes MCP (polling)
+- [ ] Substituir polling por SSE/WebSocket
 
 ---
 
 ## Prioridade Recomendada
 
-### Ordem sugerida
+### Concluidas
 
-1. Fase 1 - Fundacao e Seguranca
-2. Fase 2 - Conexoes e Catalogo
-3. Fase 3 - Workspace Base Real
-4. Fase 4 - Diagramas
-5. Fase 5 - Editor SQL
-6. Fase 6 - Explorer
-7. Fase 8 - Persistencia de Preferencias
-8. Fase 7 - Admin
-9. Fase 9 - Observabilidade e Qualidade
-10. Fase 10 - Melhorias de Produto
+Fases 1, 2, 3, 4, 5, 6, 8, 9, 11, 12 e 13 entregues. Fase 10 parcialmente.
+
+### Ordem sugerida para o que falta
+
+1. Fase 7 - Admin
+2. Fase 10 - restante (favoritos/recentes, compartilhamento de layouts, comparacao entre ambientes, IA de explicacao)
+3. Extras das Fases 4 e 12 (export PNG/SVG, layout "force", diff entre snapshots)
 
 ---
 
@@ -353,28 +452,28 @@ Objetivo: evoluir de ferramenta tecnica para produto mais completo.
 
 ### Editor SQL
 
-- status atual: funcional em modo read-only
-- implementacao real: parcial
+- status atual: funcional (somente leitura) com Monaco, abas, favoritos, EXPLAIN e export
+- implementacao real: completa (operacoes mutaveis continuam bloqueadas por design)
 
 ### Explorer
 
-- status atual: placeholder
-- implementacao real: nao existe
+- status atual: funcional (schemas, tabelas, colunas, indices, preview, docs)
+- implementacao real: completa
 
 ### Admin
 
-- status atual: placeholder
-- implementacao real: nao existe
+- status atual: parcial (resumo real da conexao + eventos de auditoria)
+- implementacao real: usuarios/roles/jobs/locks/backup ainda nao existem
 
 ### Detalhes do workspace
 
-- status atual: parcialmente fake/demo
-- implementacao real: nao consome dados reais da conexao
+- status atual: real
+- implementacao real: consome dados reais da conexao (metadados, tags, status, eventos)
 
 ### Auditoria, schema update e historico
 
-- status atual: botoes sem fluxo funcional
-- implementacao real: nao existe
+- auditoria/historico: eventos recentes ja aparecem na aba Admin
+- schema update acionavel pela UI: ainda nao existe
 
 ---
 

@@ -1,13 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
 
 import { requireCurrentUserId } from "@/lib/auth/session";
-import { decryptSecret } from "@/lib/crypto";
+import { requireDriver, toDriverConfig } from "@/lib/db/drivers";
 import { errorResponse } from "@/lib/errors";
 import { prisma } from "@/lib/prisma";
 import { serializeConnectionHealth } from "@/lib/serializers/connection";
 import { findConnectionForUser } from "@/lib/services/connections";
 import { logConnectionAudit } from "@/lib/services/workspace";
-import { testMySQLConnection } from "@/lib/db/mysql";
 
 export async function POST(
   _req: NextRequest,
@@ -26,14 +25,23 @@ export async function POST(
       return NextResponse.json({ error: "Nenhum segredo associado à conexão" }, { status: 422 });
     }
 
-    try {
-      await testMySQLConnection({
-        host: connection.host,
-        port: connection.port,
-        user: connection.username,
-        password: decryptSecret(connection.secret.cipherText),
-        database: connection.database,
+    if (connection.provider === "MIGRATIONS") {
+      await prisma.credentialSecret.update({
+        where: { id: connection.secret.id },
+        data: {
+          metadata: serializeConnectionHealth({
+            status: "ONLINE",
+            checkedAt: new Date().toISOString(),
+            error: null,
+          }),
+        },
       });
+
+      return NextResponse.json({ status: "ONLINE" });
+    }
+
+    try {
+      await requireDriver(connection.provider).testConnection(toDriverConfig(connection));
 
       await prisma.credentialSecret.update({
         where: { id: connection.secret.id },

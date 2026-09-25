@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
+import { ThemeProvider } from "@/components/theme/ThemeProvider";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -15,7 +16,7 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
   title: "Workbench Web",
   description:
-    "Ambiente MySQL Workbench Web com editor SQL, diagramas ER e ferramentas de administração",
+    "Ambiente Workbench Web para MySQL e PostgreSQL com editor SQL, diagramas ER e ferramentas de administração",
 };
 
 export default function RootLayout({
@@ -25,10 +26,8 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="pt-BR">
-      <body
-        className={`${geistSans.variable} ${geistMono.variable} antialiased bg-slate-950 text-slate-100`}
-      >
-        {children}
+      <body className={`${geistSans.variable} ${geistMono.variable} antialiased theme-light`}>
+        <ThemeProvider>{children}</ThemeProvider>
       </body>
     </html>
   );

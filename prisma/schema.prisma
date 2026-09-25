@@ -31,6 +31,8 @@ model Connection {
   host         String
   port         Int
   database     String
+  /// Schema a inspecionar em bancos que separam database de schema (Postgres). Nulo no MySQL.
+  schema       String?
   username     String
   tagsJson     String               @default("[]")
   secretId     String
@@ -41,6 +43,8 @@ model Connection {
   preferences  WorkspacePreference[]
   layouts      LayoutSnapshot[]
   auditLogs    AuditLog[]
+  migrationPackages MigrationPackage[]
+  aiModelingSessions AiModelingSession[]
 
   @@index([ownerId])
   @@index([secretId])
@@ -87,4 +91,92 @@ model AuditLog {
 
   @@index([connectionId])
   @@index([userId])
+}
+
+model MigrationPackage {
+  id             String           @id @default(cuid())
+  connectionId   String
+  connection     Connection       @relation(fields: [connectionId], references: [id])
+  ownerId        String
+  name           String
+  sourceProvider String
+  fileCount      Int
+  checksum       String
+  createdAt      DateTime         @default(now())
+  files          MigrationFile[]
+  snapshots      MigrationSnapshotRow[]
+
+  @@index([connectionId])
+  @@index([ownerId])
+}
+
+model MigrationFile {
+  id         String           @id @default(cuid())
+  packageId  String
+  package    MigrationPackage @relation(fields: [packageId], references: [id])
+  order      Int
+  name       String
+  content    String
+  checksum   String
+  createdAt  DateTime         @default(now())
+
+  @@index([packageId])
+}
+
+model MigrationSnapshotRow {
+  id             String           @id @default(cuid())
+  packageId      String
+  package        MigrationPackage @relation(fields: [packageId], references: [id])
+  migrationOrder Int
+  migrationName  String
+  diagramJson    String
+  warningsJson   String
+  createdAt      DateTime         @default(now())
+
+  @@index([packageId, migrationOrder])
+}
+
+/// Sessão de modelagem de schema assistida por LLM ("do zero", sem depender de MigrationPackage).
+model AiModelingSession {
+  id           String            @id @default(cuid())
+  connectionId String
+  connection   Connection        @relation(fields: [connectionId], references: [id])
+  ownerId      String
+  name         String
+  provider     String
+  model        String            @default("gemini-2.0-flash")
+  /// Estado atual do modelo canônico (DiagramResponse serializado).
+  diagramJson  String            @default("{\"nodes\":[],\"edges\":[],\"scopes\":[]}")
+  /// Turno para o qual a sessão foi revertida. Nulo = na ponta do histórico. Enquanto não for
+  /// nulo, os turnos posteriores continuam gravados (dá pra refazer) e só são descartados
+  /// quando o usuário envia uma nova mensagem a partir deste ponto.
+  checkpointOrder Int?
+  /// Liga/desliga a memória do projeto (MCP CodeGraph) nesta sessão.
+  memoryEnabled Boolean          @default(true)
+  /// Projeto do CodeGraph onde a memória é lida/gravada. Nulo = namespace derivado da conexão
+  /// ("workbench:<connectionId>"). Preencher para compartilhar memória com um projeto já
+  /// existente no CodeGraph (ex: o repositório de código correspondente).
+  memoryProjectId String?
+  createdAt    DateTime          @default(now())
+  updatedAt    DateTime          @updatedAt
+  turns        AiModelingTurn[]
+
+  @@index([connectionId])
+  @@index([ownerId])
+}
+
+model AiModelingTurn {
+  id            String            @id @default(cuid())
+  sessionId     String
+  session       AiModelingSession @relation(fields: [sessionId], references: [id])
+  order         Int
+  role          String
+  message       String
+  /// Operações estruturadas propostas pela LLM neste turno (JSON, só quando role = "assistant").
+  operationsJson String?
+  /// Estado do modelo logo após este turno (DiagramResponse serializado).
+  diagramJson   String
+  createdAt     DateTime          @default(now())
+
+  @@index([sessionId, order])
 }

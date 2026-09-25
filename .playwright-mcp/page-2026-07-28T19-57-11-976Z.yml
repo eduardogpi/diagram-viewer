@@ -1,0 +1,28 @@
+- generic [active] [ref=e1]:
+  - generic [ref=e2]:
+    - banner [ref=e3]:
+      - generic [ref=e4]:
+        - paragraph [ref=e5]: Workbench Web
+        - heading "Suas conexões e workspaces" [level=1] [ref=e6]
+        - paragraph [ref=e7]: Centralize conexões, diagramas e históricos SQL em um único ambiente seguro.
+      - generic [ref=e8]:
+        - button "Tema escuro" [ref=e10]
+        - generic [ref=e14]:
+          - generic [ref=e15]:
+            - paragraph [ref=e16]: Sessão de desenvolvimento
+            - paragraph [ref=e17]: Defina um identificador simples para testar o app sem um provedor real de autenticação.
+          - generic [ref=e18]:
+            - 'textbox "Ex.: demo-user" [ref=e19]': demo-user
+            - button "Entrar" [ref=e21]
+    - main [ref=e22]:
+      - generic [ref=e24]:
+        - paragraph [ref=e25]: "Nenhum usuário autenticado foi encontrado via cookie `workbench_user_id` ou header `x-user-id`."
+        - generic [ref=e26]:
+          - generic [ref=e27]:
+            - paragraph [ref=e28]: Sessão de desenvolvimento
+            - paragraph [ref=e29]: Defina um identificador simples para testar o app sem um provedor real de autenticação.
+          - generic [ref=e30]:
+            - 'textbox "Ex.: demo-user" [ref=e31]': demo-user
+            - button "Entrar" [ref=e33]
+  - button "Open Next.js Dev Tools" [ref=e39] [cursor=pointer]
+  - alert [ref=e43]

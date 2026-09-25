@@ -21,6 +21,8 @@ import ReactFlow, {
   type Viewport,
 } from "reactflow";
 import "reactflow/dist/style.css";
+import { Waypoints } from "lucide-react";
+import { ThemeToggle } from "@/components/theme/ThemeToggle";
 
 type Props = { connectionId: string };
 type GroupingMode = "domain" | "schema" | "prefix";
@@ -40,6 +42,7 @@ type Relationship = {
 };
 type Scope = { id: string; label: string; description: string; tables: number };
 type Payload = { nodes: TableNode[]; edges: Relationship[]; scopes: Scope[] };
+type ManualEdge = { id: string; source: string; target: string };
 type DiagramPreferences = {
   minimap: boolean;
   scopeDepth: number;
@@ -65,9 +68,20 @@ type NodeData = {
   schema: string;
   scope: string;
   columns: Column[];
+  /** true = tabela corresponde à busca textual ativa. */
   highlighted: boolean;
-  dimmed: boolean;
+  /** true = tabela é extremidade da seleção atual (linha ou "mostrar relações"). */
+  emphasized: boolean;
+  /** opacidade aplicada quando a tabela não participa da seleção/busca ativa (1 = normal). */
+  dimOpacity: number;
   selected: boolean;
+  layoutDirection: LayoutDirection;
+  /** true = a tabela tem ao menos uma relação (FK) de entrada ou saída. */
+  hasRelations: boolean;
+  /** Posições (0-1) dos handles de entrada/saída, distribuídas quando há múltiplas relações. */
+  targetHandlePositions: number[];
+  sourceHandlePositions: number[];
+  onShowRelations?: (nodeId: string) => void;
 };
 
 const NODE_W = 360;
@@ -210,28 +224,99 @@ function expandNeighbors(baseIds: string[], adjacency: Map<string, Set<string>>,
   return visited;
 }
 
-function layoutNodes(
-  nodes: Array<Pick<Node<NodeData>, "id" | "type" | "data">>,
-  edges: Array<Pick<Edge, "source" | "target">>,
+type GraphLayout = {
+  positions: Map<string, { x: number; y: number }>;
+  sourceHandleIndex: Map<string, number>;
+  targetHandleIndex: Map<string, number>;
+  sourceHandlePositions: Map<string, number[]>;
+  targetHandlePositions: Map<string, number[]>;
+  sourceDegree: Map<string, number>;
+  targetDegree: Map<string, number>;
+};
+
+/**
+ * Calcula posição (dagre) e distribuição de handles de cada nó. Quando uma tabela tem mais de
+ * uma relação, os pontos de conexão são espalhados ao longo do eixo em que os handles ficam
+ * (horizontal no layout TB, vertical no LR) e ordenados pela posição do nó do outro lado —
+ * evita que múltiplas linhas saiam/entrem todas do mesmo ponto e se sobreponham.
+ */
+function computeGraphLayout(
+  nodeIds: string[],
+  edges: Array<{ id: string; source: string; target: string }>,
   direction: LayoutDirection,
-  positions: Map<string, { x: number; y: number }>
-) {
+  pinnedPositions: Map<string, { x: number; y: number }>
+): GraphLayout {
   const graph = new dagre.graphlib.Graph().setDefaultEdgeLabel(() => ({}));
   graph.setGraph({ rankdir: direction, ranksep: direction === "TB" ? 170 : 220, nodesep: 120, edgesep: 60, marginx: 48, marginy: 48 });
-  nodes.forEach((node) => graph.setNode(node.id, { width: NODE_W, height: NODE_H }));
-  edges.forEach((edge) => graph.setEdge(edge.source, edge.target));
+  nodeIds.forEach((id) => graph.setNode(id, { width: NODE_W, height: NODE_H }));
+  edges.forEach((edge) => {
+    if (graph.hasNode(edge.source) && graph.hasNode(edge.target)) {
+      graph.setEdge(edge.source, edge.target);
+    }
+  });
   dagre.layout(graph);
 
-  return nodes.map((node) => {
-    const pinned = positions.get(node.id);
-    const laidOut = graph.node(node.id);
-    return {
-      ...node,
-      position: pinned ?? { x: laidOut.x - NODE_W / 2, y: laidOut.y - NODE_H / 2 },
-      sourcePosition: direction === "LR" ? Position.Right : Position.Bottom,
-      targetPosition: direction === "LR" ? Position.Left : Position.Top,
-    } satisfies Node<NodeData>;
+  const positions = new Map<string, { x: number; y: number }>();
+  nodeIds.forEach((id) => {
+    const pinned = pinnedPositions.get(id);
+    const laidOut = graph.node(id);
+    positions.set(id, pinned ?? { x: laidOut.x - NODE_W / 2, y: laidOut.y - NODE_H / 2 });
   });
+
+  const axisOf = (id: string) => {
+    const pos = positions.get(id);
+    if (!pos) return 0;
+    return direction === "LR" ? pos.y : pos.x;
+  };
+
+  const outgoingByNode = new Map<string, typeof edges>();
+  const incomingByNode = new Map<string, typeof edges>();
+  edges.forEach((edge) => {
+    if (!graph.hasNode(edge.source) || !graph.hasNode(edge.target)) return;
+    if (!outgoingByNode.has(edge.source)) outgoingByNode.set(edge.source, []);
+    outgoingByNode.get(edge.source)!.push(edge);
+    if (!incomingByNode.has(edge.target)) incomingByNode.set(edge.target, []);
+    incomingByNode.get(edge.target)!.push(edge);
+  });
+
+  const sourceHandleIndex = new Map<string, number>();
+  const targetHandleIndex = new Map<string, number>();
+  outgoingByNode.forEach((list) => {
+    [...list].sort((a, b) => axisOf(a.target) - axisOf(b.target)).forEach((edge, idx) => sourceHandleIndex.set(edge.id, idx));
+  });
+  incomingByNode.forEach((list) => {
+    [...list].sort((a, b) => axisOf(a.source) - axisOf(b.source)).forEach((edge, idx) => targetHandleIndex.set(edge.id, idx));
+  });
+
+  function handlePositions(count: number): number[] {
+    if (count <= 1) return [0.5];
+    const start = 0.18;
+    const end = 0.82;
+    return Array.from({ length: count }, (_, i) => start + ((end - start) * i) / (count - 1));
+  }
+
+  const sourceHandlePositions = new Map<string, number[]>();
+  const targetHandlePositions = new Map<string, number[]>();
+  const sourceDegree = new Map<string, number>();
+  const targetDegree = new Map<string, number>();
+  nodeIds.forEach((id) => {
+    const outCount = outgoingByNode.get(id)?.length ?? 0;
+    const inCount = incomingByNode.get(id)?.length ?? 0;
+    sourceDegree.set(id, outCount);
+    targetDegree.set(id, inCount);
+    sourceHandlePositions.set(id, handlePositions(outCount));
+    targetHandlePositions.set(id, handlePositions(inCount));
+  });
+
+  return {
+    positions,
+    sourceHandleIndex,
+    targetHandleIndex,
+    sourceHandlePositions,
+    targetHandlePositions,
+    sourceDegree,
+    targetDegree,
+  };
 }
 
 function downloadJson(filename: string, value: unknown) {
@@ -248,46 +333,229 @@ function toggleInList(id: string, setter: Dispatch<SetStateAction<string[]>>) {
   setter((current) => (current.includes(id) ? current.filter((item) => item !== id) : [...current, id]));
 }
 
-function TableCard({ data }: NodeProps<NodeData>) {
+function TableCard({ id, data }: NodeProps<NodeData>) {
   const tone = colorFor(data.scope);
   const columns = data.columns.slice(0, 10);
   const hidden = data.columns.length - columns.length;
+  const isLR = data.layoutDirection === "LR";
+  const targetPos = isLR ? Position.Left : Position.Top;
+  const sourcePos = isLR ? Position.Right : Position.Bottom;
+  const targetHandles = data.targetHandlePositions.length > 0 ? data.targetHandlePositions : [0.5];
+  const sourceHandles = data.sourceHandlePositions.length > 0 ? data.sourceHandlePositions : [0.5];
+  const ringActive = data.selected || data.highlighted || data.emphasized;
 
   return (
     <div
-      className="min-w-[340px] rounded-3xl border bg-slate-950/95 shadow-[0_24px_60px_rgba(2,6,23,0.55)]"
+      className="min-w-[340px] rounded-3xl border bg-[var(--color-card-bg)] shadow-[var(--color-card-shadow)] transition-opacity"
       style={{
-        borderColor: data.selected ? tone.color : data.highlighted ? tone.border : "rgba(71,85,105,0.55)",
-        boxShadow: data.highlighted ? `0 0 0 1px ${tone.color}55, 0 24px 60px rgba(2,6,23,0.55)` : "0 24px 60px rgba(2,6,23,0.55)",
-        opacity: data.dimmed ? 0.5 : 1,
+        borderColor: data.selected ? tone.color : ringActive ? tone.border : "rgba(148, 163, 184, 0.6)",
+        boxShadow: ringActive ? `0 0 0 1px ${tone.color}55, var(--color-card-shadow)` : "var(--color-card-shadow)",
+        opacity: data.dimOpacity,
       }}
     >
-      <Handle type="target" position={Position.Left} style={{ width: 10, height: 10, background: tone.color, border: `2px solid ${tone.border}` }} />
+      {targetHandles.map((pct, i) => (
+        <Handle
+          key={`t-${i}`}
+          id={`t-${i}`}
+          type="target"
+          position={targetPos}
+          style={
+            isLR
+              ? { top: `${pct * 100}%`, width: 10, height: 10, background: tone.color, border: `2px solid ${tone.border}` }
+              : { left: `${pct * 100}%`, width: 10, height: 10, background: tone.color, border: `2px solid ${tone.border}` }
+          }
+        />
+      ))}
       <div className="rounded-t-3xl border-b px-5 py-4" style={{ borderColor: tone.border, background: tone.fill }}>
-        <p className="text-sm font-semibold uppercase tracking-[0.22em]" style={{ color: tone.color }}>{data.scope}</p>
-        <h4 className="mt-2 truncate text-lg font-semibold text-white">{data.label}</h4>
-        <p className="mt-2 truncate font-mono text-xs text-slate-500">{data.schema}</p>
+        <div className="flex items-center gap-2">
+          <p className="flex-1 text-sm font-semibold uppercase tracking-[0.22em]" style={{ color: tone.color }}>{data.scope}</p>
+          {data.hasRelations ? (
+            <button
+              type="button"
+              title="Mostrar todas as relações desta tabela"
+              onClick={(e) => {
+                e.stopPropagation();
+                data.onShowRelations?.(id);
+              }}
+              className={`nodrag nopan flex h-5 w-5 shrink-0 items-center justify-center rounded-md border transition ${
+                data.selected
+                  ? "border-[var(--color-accent)] bg-[var(--color-accent-soft)] text-[var(--color-accent)]"
+                  : "border-[var(--color-border-subtle)] text-[var(--color-text-muted)] hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]"
+              }`}
+            >
+              <Waypoints className="h-3 w-3" />
+            </button>
+          ) : null}
+        </div>
+        <h4 className="mt-2 truncate text-lg font-semibold text-[var(--color-text-primary)]">{data.label}</h4>
+        <p className="mt-2 truncate font-mono text-xs text-[var(--color-text-secondary)]">{data.schema}</p>
       </div>
       <div className="space-y-2 px-5 py-4">
         {columns.map((column) => (
           <div key={column.name} className="flex items-center justify-between gap-3 text-xs">
             <div className="flex min-w-0 items-center gap-2">
               <span className={`inline-flex h-5 min-w-[30px] items-center justify-center rounded-md border px-1.5 text-[10px] font-semibold ${
-                column.isPrimary ? "border-amber-500/50 bg-amber-500/10 text-amber-300" : column.isForeign ? "border-cyan-500/50 bg-cyan-500/10 text-cyan-200" : "border-slate-800 bg-slate-900/70 text-slate-500"
+                column.isPrimary
+                  ? "border-[var(--color-warning)]/50 bg-[var(--color-warning-soft)] text-[var(--color-warning)]"
+                  : column.isForeign
+                    ? "border-[var(--color-accent)]/50 bg-[var(--color-accent-soft)] text-[var(--color-accent)]"
+                    : "border-[var(--color-border-subtle)] bg-[var(--color-panel-muted)] text-[var(--color-text-secondary)]"
               }`}>{column.isPrimary ? "PK" : column.isForeign ? "FK" : ""}</span>
-              <span className="truncate font-mono text-[12px] text-slate-100">{column.name}</span>
+              <span className="truncate font-mono text-[12px] text-[var(--color-text-primary)]">{column.name}</span>
             </div>
-            <span className="font-mono text-[11px] text-slate-500">{column.type}</span>
+            <span className="font-mono text-[11px] text-[var(--color-text-secondary)]">{column.type}</span>
           </div>
         ))}
-        {hidden > 0 ? <div className="rounded-2xl border border-slate-800/80 bg-slate-900/60 px-3 py-2 text-[11px] text-slate-400">+{hidden} columns hidden to keep the node readable</div> : null}
+        {hidden > 0 ? <div className="rounded-2xl border border-[var(--color-border-subtle)] bg-[var(--color-panel-muted)] px-3 py-2 text-[11px] text-[var(--color-text-secondary)]">+{hidden} colunas omitidas</div> : null}
       </div>
-      <Handle type="source" position={Position.Right} style={{ width: 10, height: 10, background: tone.color, border: `2px solid ${tone.border}` }} />
+      {sourceHandles.map((pct, i) => (
+        <Handle
+          key={`s-${i}`}
+          id={`s-${i}`}
+          type="source"
+          position={sourcePos}
+          style={
+            isLR
+              ? { top: `${pct * 100}%`, width: 10, height: 10, background: tone.color, border: `2px solid ${tone.border}` }
+              : { left: `${pct * 100}%`, width: 10, height: 10, background: tone.color, border: `2px solid ${tone.border}` }
+          }
+        />
+      ))}
     </div>
   );
 }
 
 const nodeTypes = { table: TableCard };
+
+function NodePanel({
+  node,
+  selectedTableIds,
+  neighborIds,
+  toolbarHeight,
+  onFocus,
+  onToggleNeighbors,
+  onClose,
+}: {
+  node: TableNode;
+  selectedTableIds: string[];
+  neighborIds: Set<string>;
+  toolbarHeight: number;
+  onFocus: () => void;
+  onToggleNeighbors: () => void;
+  onClose: () => void;
+}) {
+  const neighborsActive = selectedTableIds.length > 0 && selectedTableIds.every((id) => neighborIds.has(id));
+
+  return (
+    <Panel position="top-right" style={{ marginTop: toolbarHeight + 12 }} className="w-[360px] rounded-3xl border border-white/10 bg-slate-950/92 p-4 text-sm text-slate-300 shadow-2xl">
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <p className="text-[10px] uppercase tracking-[0.26em] text-slate-500">Tabela selecionada</p>
+          <h4 className="mt-2 truncate text-lg font-semibold text-white">{node.label}</h4>
+          <p className="mt-1 truncate font-mono text-xs text-slate-500">{node.schema}</p>
+        </div>
+        <button
+          onClick={onClose}
+          className="mt-1 flex-shrink-0 rounded-xl border border-white/10 bg-white/5 px-2.5 py-1.5 text-xs font-semibold text-slate-400 transition hover:bg-white/10 hover:text-slate-200"
+          title="Fechar painel"
+        >
+          ✕
+        </button>
+      </div>
+
+      <div className="mt-4 grid gap-2 sm:grid-cols-2">
+        <button
+          onClick={onFocus}
+          className="rounded-2xl border border-white/10 bg-white/5 px-3 py-2.5 text-sm font-semibold text-slate-200 transition hover:bg-white/10"
+        >
+          Centralizar
+        </button>
+
+        <button
+          onClick={onToggleNeighbors}
+          className={`rounded-2xl border px-3 py-2.5 text-sm font-semibold transition ${
+            neighborsActive
+              ? "border-cyan-400/60 bg-cyan-400/15 text-cyan-200 hover:bg-cyan-400/20"
+              : "border-white/10 bg-white/5 text-slate-300 hover:bg-white/10"
+          }`}
+          title={neighborsActive ? "Desativar filtro de vizinhos" : "Mostrar apenas tabelas vizinhas"}
+        >
+          <span className={`mr-1.5 inline-block h-2 w-2 rounded-full ${
+            neighborsActive ? "bg-cyan-400" : "bg-slate-600"
+          }`} />
+          Vizinhos
+        </button>
+      </div>
+
+      <div className="mt-4 grid grid-cols-2 gap-2">
+        <div className="rounded-2xl border border-white/10 bg-white/5 p-3">
+          <p className="text-xs text-slate-500">Colunas</p>
+          <p className="mt-1 font-semibold text-white">{node.columns.length}</p>
+        </div>
+        <div className="rounded-2xl border border-white/10 bg-white/5 p-3">
+          <p className="text-xs text-slate-500">Relações</p>
+          <p className="mt-1 font-semibold text-white">{neighborIds.size - 1}</p>
+        </div>
+      </div>
+    </Panel>
+  );
+}
+
+function EdgePanel({ edge, onRemove }: { edge: Edge<Relationship>; onRemove?: () => void }) {
+  const data = edge.data;
+  const isManual = edge.data?.constraint?.startsWith("manual:");
+  return (
+    <Panel position="bottom-right" className="mb-4 w-[380px] rounded-3xl border border-white/10 bg-slate-950/92 p-4 text-sm text-slate-300 shadow-2xl">
+      <div className="flex items-start justify-between gap-2">
+        <div>
+          <div className="flex items-center gap-2">
+            <p className="text-[10px] uppercase tracking-[0.26em] text-slate-500">Relacionamento</p>
+            {isManual && (
+              <span className="rounded-md border border-amber-500/40 bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-amber-300">Manual</span>
+            )}
+          </div>
+          <h4 className="mt-2 text-base font-semibold text-white">{isManual ? `${edge.source} → ${edge.target}` : data?.constraint}</h4>
+          <p className="mt-1 font-mono text-xs text-slate-500">{edge.source} → {edge.target}</p>
+        </div>
+        {isManual && onRemove && (
+          <button
+            onClick={onRemove}
+            className="mt-1 flex-shrink-0 rounded-xl border border-red-500/30 bg-red-500/10 px-2.5 py-1.5 text-xs font-semibold text-red-300 transition hover:bg-red-500/20"
+            title="Remover FK manual"
+          >
+            Remover
+          </button>
+        )}
+      </div>
+      {!isManual && (
+        <>
+          <div className="mt-4 grid gap-3 sm:grid-cols-2">
+            <div className="rounded-2xl border border-white/10 bg-white/5 p-3">
+              <p className="text-xs text-slate-500">Cardinalidade</p>
+              <p className="mt-1 font-semibold text-white">{data?.cardinality ?? "Não informado"}</p>
+            </div>
+            <div className="rounded-2xl border border-white/10 bg-white/5 p-3">
+              <p className="text-xs text-slate-500">Delete / Update</p>
+              <p className="mt-1 text-white">{data?.onDelete ?? "Padrão"} / {data?.onUpdate ?? "Padrão"}</p>
+            </div>
+          </div>
+          <div className="mt-4 rounded-2xl border border-white/10 bg-white/5 p-3">
+            <p className="text-xs text-slate-500">Mapeamento de colunas</p>
+            <div className="mt-2 space-y-2">
+              {data?.columns.map((pair) => (
+                <div key={`${pair.source}-${pair.target}`} className="flex items-center justify-between gap-3 text-xs">
+                  <span className="font-mono text-cyan-200">{pair.source}</span>
+                  <span className="text-slate-500">→</span>
+                  <span className="font-mono text-emerald-200">{pair.target}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </>
+      )}
+    </Panel>
+  );
+}
 
 function FilterModal({
   open,
@@ -325,49 +593,103 @@ function FilterModal({
     }));
 
   return (
-    <div className="fixed inset-0 z-50 flex items-end justify-center bg-slate-950/75 p-4 backdrop-blur-md sm:items-center" onClick={(event) => event.target === event.currentTarget && onClose()}>
-      <div className="flex max-h-[92vh] w-full max-w-6xl flex-col overflow-hidden rounded-[2rem] border border-white/10 bg-[#08101b] shadow-[0_40px_120px_rgba(0,0,0,0.8)]">
-        <div className="flex items-start justify-between gap-4 border-b border-white/10 px-6 py-5">
+    <div
+      className="fixed inset-0 z-50 flex items-end justify-center bg-[color-mix(in_srgb,var(--color-bg-canvas)_65%,#000)]/70 p-4 backdrop-blur-md sm:items-center"
+      onClick={(event) => event.target === event.currentTarget && onClose()}
+    >
+      <div className="flex max-h-[92vh] w-full max-w-6xl flex-col overflow-hidden rounded-[2rem] border border-[var(--color-border-strong)] bg-[var(--color-bg-layer-1)] shadow-[var(--shadow-floating)]">
+        <div className="flex items-start justify-between gap-4 border-b border-[var(--color-border-subtle)] px-6 py-5">
           <div>
-            <p className="text-[10px] uppercase tracking-[0.35em] text-cyan-400/70">Diagram filters</p>
-            <h3 className="mt-2 text-xl font-semibold text-white">Scopes and tables</h3>
+            <p className="text-[10px] uppercase tracking-[0.35em] text-[var(--color-text-muted)]">Filtros do diagrama</p>
+            <h3 className="mt-2 text-xl font-semibold text-[var(--color-text-primary)]">Escopos e tabelas</h3>
           </div>
-          <button onClick={onClose} className="rounded-2xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-slate-300 transition hover:bg-white/10 hover:text-white">Close</button>
+          <button
+            onClick={onClose}
+            className="rounded-2xl border border-[var(--color-border-subtle)] bg-[var(--color-bg-layer-2)] px-3 py-2 text-sm text-[var(--color-text-primary)] transition hover:border-[var(--color-accent)]"
+          >
+            Fechar
+          </button>
         </div>
-        <div className="grid gap-4 border-b border-white/10 px-6 py-4 lg:grid-cols-2">
-          <input value={scopeQuery} onChange={(event) => setScopeQuery(event.target.value)} placeholder="Search scopes" className="rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-slate-100 outline-none transition focus:border-cyan-400/50" />
-          <input value={tableQuery} onChange={(event) => setTableQuery(event.target.value)} placeholder="Search tables or columns" className="rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-slate-100 outline-none transition focus:border-cyan-400/50" />
+        <div className="grid gap-4 border-b border-[var(--color-border-subtle)] px-6 py-4 lg:grid-cols-2">
+          <input
+            value={scopeQuery}
+            onChange={(event) => setScopeQuery(event.target.value)}
+            placeholder="Buscar escopo"
+            className="rounded-2xl border border-[var(--color-border-subtle)] bg-[var(--color-bg-layer-2)] px-4 py-3 text-sm text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
+          />
+          <input
+            value={tableQuery}
+            onChange={(event) => setTableQuery(event.target.value)}
+            placeholder="Buscar tabela ou coluna"
+            className="rounded-2xl border border-[var(--color-border-subtle)] bg-[var(--color-bg-layer-2)] px-4 py-3 text-sm text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)]"
+          />
         </div>
         <div className="flex-1 space-y-5 overflow-auto px-6 py-5">
           {filteredScopes.map((scope) => {
             const tone = colorFor(scope.id);
             const enabled = activeScopeSet.has(scope.id);
             return (
-              <section key={scope.id} className="overflow-hidden rounded-3xl border border-white/10 bg-white/5">
-                <div className="flex flex-wrap items-start justify-between gap-3 border-b border-white/10 px-5 py-4">
+              <section key={scope.id} className="overflow-hidden rounded-3xl border border-[var(--color-border-subtle)] bg-[var(--color-bg-layer-1)]">
+                <div className="flex flex-wrap items-start justify-between gap-3 border-b border-[var(--color-border-subtle)] px-5 py-4">
                   <div>
                     <div className="flex items-center gap-3">
                       <span className="inline-flex h-3 w-3 rounded-full" style={{ background: tone.color, boxShadow: `0 0 12px ${tone.color}` }} />
-                      <h4 className="text-sm font-semibold text-white">{scope.label}</h4>
+                      <h4 className="text-sm font-semibold text-[var(--color-text-primary)]">{scope.label}</h4>
                     </div>
-                    <p className="mt-1 text-sm text-slate-500">{scope.description}</p>
+                    <p className="mt-1 text-sm text-[var(--color-text-muted)]">{scope.description}</p>
                   </div>
                   <div className="flex flex-wrap gap-2">
-                    <button onClick={() => toggleInList(scope.id, setSelectedScopeIds)} className="rounded-2xl border px-3 py-2 text-xs font-semibold transition" style={{ borderColor: enabled ? tone.border : "rgba(255,255,255,0.08)", background: enabled ? tone.fill : "rgba(255,255,255,0.04)", color: enabled ? tone.color : "#cbd5e1" }}>{enabled ? "Scope visible" : "Enable scope"}</button>
-                    <button onClick={() => setSelectedTableIds((current) => Array.from(new Set([...current, ...scope.filteredTables.map((table) => table.id)])))} className="rounded-2xl border border-white/10 bg-white/5 px-3 py-2 text-xs font-semibold text-slate-200 transition hover:bg-white/10">Select visible tables</button>
-                    <button onClick={() => setSelectedTableIds((current) => current.filter((tableId) => !scope.filteredTables.some((table) => table.id === tableId)))} className="rounded-2xl border border-white/10 bg-white/5 px-3 py-2 text-xs font-semibold text-slate-400 transition hover:bg-white/10 hover:text-slate-200">Hide visible tables</button>
+                    <button
+                      onClick={() => toggleInList(scope.id, setSelectedScopeIds)}
+                      className="rounded-2xl border px-3 py-2 text-xs font-semibold transition"
+                      style={{
+                        borderColor: enabled ? tone.border : "var(--color-border-subtle)",
+                        background: enabled ? tone.fill : "var(--color-bg-layer-2)",
+                        color: enabled ? tone.color : "var(--color-text-secondary)",
+                      }}
+                    >
+                      {enabled ? "Escopo visível" : "Ativar escopo"}
+                    </button>
+                    <button
+                      onClick={() =>
+                        setSelectedTableIds((current) => Array.from(new Set([...current, ...scope.filteredTables.map((table) => table.id)])))
+                      }
+                      className="rounded-2xl border border-[var(--color-border-subtle)] bg-[var(--color-bg-layer-2)] px-3 py-2 text-xs font-semibold text-[var(--color-text-primary)] transition hover:border-[var(--color-accent)]"
+                    >
+                      Selecionar tabelas
+                    </button>
+                    <button
+                      onClick={() =>
+                        setSelectedTableIds((current) => current.filter((tableId) => !scope.filteredTables.some((table) => table.id === tableId)))
+                      }
+                      className="rounded-2xl border border-[var(--color-border-subtle)] bg-[var(--color-bg-layer-2)] px-3 py-2 text-xs font-semibold text-[var(--color-text-secondary)] transition hover:border-[var(--color-accent)]"
+                    >
+                      Ocultar tabelas
+                    </button>
                   </div>
                 </div>
                 <div className="grid gap-3 p-5 md:grid-cols-2 xl:grid-cols-3">
                   {scope.filteredTables.map((table) => {
                     const checked = selectedTableSet.has(table.id);
                     return (
-                      <label key={table.id} className="flex cursor-pointer items-start gap-3 rounded-2xl border p-4 transition" style={{ borderColor: checked ? tone.border : "rgba(255,255,255,0.08)", background: checked ? tone.fill : "rgba(255,255,255,0.03)" }}>
-                        <input type="checkbox" checked={checked} onChange={() => toggleInList(table.id, setSelectedTableIds)} className="mt-1 h-4 w-4 rounded border-slate-700 bg-slate-900 text-cyan-400" />
+                      <label
+                        key={table.id}
+                        className="flex cursor-pointer items-start gap-3 rounded-2xl border p-4 transition"
+                        style={{
+                          borderColor: checked ? tone.border : "var(--color-border-subtle)",
+                          background: checked ? tone.fill : "var(--color-bg-layer-2)",
+                        }}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={() => toggleInList(table.id, setSelectedTableIds)}
+                          className="mt-1 h-4 w-4 rounded border-[var(--color-border-subtle)] bg-[var(--color-bg-layer-1)] text-[var(--color-accent)]"
+                        />
                         <div className="min-w-0 flex-1">
-                          <p className="truncate text-sm font-semibold text-white">{table.label}</p>
-                          <p className="mt-1 truncate font-mono text-xs text-slate-500">{table.schema}</p>
-                          <p className="mt-2 text-xs text-slate-400">{table.columns.length} columns</p>
+                          <p className="truncate text-sm font-semibold text-[var(--color-text-primary)]">{table.label}</p>
+                          <p className="mt-1 truncate font-mono text-xs text-[var(--color-text-muted)]">{table.schema}</p>
+                          <p className="mt-2 text-xs text-[var(--color-text-secondary)]">{table.columns.length} colunas</p>
                         </div>
                       </label>
                     );
@@ -377,12 +699,27 @@ function FilterModal({
             );
           })}
         </div>
-        <div className="flex flex-wrap items-center justify-between gap-3 border-t border-white/10 px-6 py-4">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-t border-[var(--color-border-subtle)] px-6 py-4">
           <div className="flex flex-wrap gap-2">
-            <button onClick={() => setSelectedScopeIds([])} className="rounded-2xl border border-white/10 bg-white/5 px-3 py-2 text-xs font-semibold text-slate-300 transition hover:bg-white/10">Show all scopes</button>
-            <button onClick={() => setSelectedTableIds([])} className="rounded-2xl border border-white/10 bg-white/5 px-3 py-2 text-xs font-semibold text-slate-300 transition hover:bg-white/10">Clear table selection</button>
+            <button
+              onClick={() => setSelectedScopeIds([])}
+              className="rounded-2xl border border-[var(--color-border-subtle)] bg-[var(--color-bg-layer-2)] px-3 py-2 text-xs font-semibold text-[var(--color-text-secondary)] transition hover:border-[var(--color-accent)]"
+            >
+              Mostrar todos os escopos
+            </button>
+            <button
+              onClick={() => setSelectedTableIds([])}
+              className="rounded-2xl border border-[var(--color-border-subtle)] bg-[var(--color-bg-layer-2)] px-3 py-2 text-xs font-semibold text-[var(--color-text-secondary)] transition hover:border-[var(--color-accent)]"
+            >
+              Limpar seleção de tabelas
+            </button>
           </div>
-          <button onClick={onClose} className="rounded-2xl bg-cyan-400 px-5 py-2.5 text-sm font-semibold text-slate-950 transition hover:bg-cyan-300">Apply filters</button>
+          <button
+            onClick={onClose}
+            className="rounded-2xl bg-[var(--color-accent)] px-5 py-2.5 text-sm font-semibold text-[var(--color-text-inverse)] transition hover:bg-[color-mix(in_srgb,var(--color-accent)_90%,var(--color-text-primary))]"
+          >
+            Aplicar filtros
+          </button>
         </div>
       </div>
     </div>
@@ -391,7 +728,9 @@ function FilterModal({
 
 export default function DiagramScopeView({ connectionId }: Props) {
   const canvasRef = useRef<HTMLDivElement | null>(null);
+  const toolbarRef = useRef<HTMLDivElement | null>(null);
   const prefTimer = useRef<number | null>(null);
+  const [toolbarHeight, setToolbarHeight] = useState(120);
   const [payload, setPayload] = useState<Payload | null>(null);
   const [status, setStatus] = useState<"loading" | "idle" | "error">("loading");
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -414,6 +753,9 @@ export default function DiagramScopeView({ connectionId }: Props) {
   const [selectedTableIds, setSelectedTableIds] = useState<string[]>(DEFAULT_PREFERENCES.selectedTableIds);
   const [searchQuery, setSearchQuery] = useState(DEFAULT_PREFERENCES.searchQuery);
   const [rfNodes, setRfNodes, onNodesChange] = useNodesState<NodeData>([]);
+  const [manualEdges, setManualEdges] = useState<ManualEdge[]>([]);
+  const [linkMode, setLinkMode] = useState(false);
+  const [linkSource, setLinkSource] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -491,37 +833,139 @@ export default function DiagramScopeView({ connectionId }: Props) {
   const visibleTableSet = useMemo(() => new Set(visibleTables.map((table) => table.id)), [visibleTables]);
   const highlightedTableSet = useMemo(() => new Set(visibleTables.filter((table) => search && (table.label.toLowerCase().includes(search) || table.schema.toLowerCase().includes(search) || table.columns.some((column) => column.name.toLowerCase().includes(search)))).map((table) => table.id)), [search, visibleTables]);
 
-  const edges = useMemo(() => (payload?.edges ?? []).filter((edge) => visibleTableSet.has(edge.source) && visibleTableSet.has(edge.target)).map((edge) => {
-    const tone = colorFor(tableGroupMap.get(edge.source) ?? edge.scope);
-    const emphasized = edge.id === selectedEdgeId || edge.source === selectedNodeId || edge.target === selectedNodeId;
-    return {
-      id: edge.id,
-      source: edge.source,
-      target: edge.target,
-      data: edge,
-      markerEnd: { type: MarkerType.ArrowClosed, width: 20, height: 20, color: tone.color },
-      style: { stroke: tone.color, strokeWidth: emphasized ? 2.8 : 1.8, opacity: emphasized ? 1 : 0.65 },
-      label: edge.constraint,
-      labelStyle: { fill: tone.color, fontSize: 11, fontWeight: 700 },
-      labelBgStyle: { fill: "#020617", fillOpacity: 0.88 },
-      labelBgBorderRadius: 10,
-      labelBgPadding: [8, 4] as [number, number],
-    } satisfies Edge<Relationship>;
-  }), [payload?.edges, selectedEdgeId, selectedNodeId, tableGroupMap, visibleTableSet]);
+  // Conectividade "crua" (sem estilo), usada só para o layout dagre e para os handles —
+  // separada da lista de edges estilizada abaixo pra evitar dependência circular.
+  const connectivityEdges = useMemo(() => {
+    const intrinsic = (payload?.edges ?? [])
+      .filter((edge) => visibleTableSet.has(edge.source) && visibleTableSet.has(edge.target))
+      .map((edge) => ({ id: edge.id, source: edge.source, target: edge.target }));
+    const manual = manualEdges
+      .filter((me) => visibleTableSet.has(me.source) && visibleTableSet.has(me.target))
+      .map((me) => ({ id: me.id, source: me.source, target: me.target }));
+    return [...intrinsic, ...manual];
+  }, [manualEdges, payload?.edges, visibleTableSet]);
 
-  const layoutedNodes = useMemo(() => layoutNodes(visibleTables.map((table) => ({
-    id: table.id,
-    type: "table",
-      data: {
-        label: table.label,
-        schema: table.schema,
-        scope: tableGroupMap.get(table.id) ?? table.scope,
-        columns: table.columns,
-        highlighted: highlightedTableSet.has(table.id),
-        dimmed: highlightedTableSet.size > 0 && !highlightedTableSet.has(table.id),
-        selected: table.id === selectedNodeId,
-      },
-  })), edges.map((edge) => ({ source: edge.source, target: edge.target })), layoutDirection, manualPositions), [edges, highlightedTableSet, layoutDirection, manualPositions, selectedNodeId, tableGroupMap, visibleTables]);
+  const graphLayout = useMemo(
+    () => computeGraphLayout(visibleTables.map((table) => table.id), connectivityEdges, layoutDirection, manualPositions),
+    [connectivityEdges, layoutDirection, manualPositions, visibleTables]
+  );
+
+  // Conjunto de linhas e tabelas envolvidas na seleção atual: uma única relação (clique numa
+  // linha) ou todas as relações de uma tabela (botão "mostrar todas as relações" no cabeçalho).
+  const highlighted = useMemo(() => {
+    if (!selectedEdgeId && !selectedNodeId) return null;
+    const edgeIds = new Set<string>();
+    const nodeIds = new Set<string>();
+    if (selectedEdgeId) {
+      const edge = connectivityEdges.find((e) => e.id === selectedEdgeId);
+      if (!edge) return null;
+      edgeIds.add(edge.id);
+      nodeIds.add(edge.source);
+      nodeIds.add(edge.target);
+    } else if (selectedNodeId) {
+      nodeIds.add(selectedNodeId);
+      connectivityEdges.forEach((edge) => {
+        if (edge.source === selectedNodeId || edge.target === selectedNodeId) {
+          edgeIds.add(edge.id);
+          nodeIds.add(edge.source);
+          nodeIds.add(edge.target);
+        }
+      });
+    }
+    if (edgeIds.size === 0 && nodeIds.size === 0) return null;
+    return { edgeIds, nodeIds };
+  }, [connectivityEdges, selectedEdgeId, selectedNodeId]);
+
+  const showAllRelationsFor = useCallback((nodeId: string) => {
+    setSelectedNodeId((prev) => (prev === nodeId ? null : nodeId));
+    setSelectedEdgeId(null);
+  }, []);
+
+  const edges = useMemo(() => {
+    const intrinsic = (payload?.edges ?? []).filter((edge) => visibleTableSet.has(edge.source) && visibleTableSet.has(edge.target)).map((edge) => {
+      const tone = colorFor(tableGroupMap.get(edge.source) ?? edge.scope);
+      const emphasized = highlighted?.edgeIds.has(edge.id) ?? false;
+      const dimmed = highlighted ? !emphasized : false;
+      return {
+        id: edge.id,
+        source: edge.source,
+        target: edge.target,
+        sourceHandle: `s-${graphLayout.sourceHandleIndex.get(edge.id) ?? 0}`,
+        targetHandle: `t-${graphLayout.targetHandleIndex.get(edge.id) ?? 0}`,
+        data: edge,
+        zIndex: emphasized ? 1000 : 0,
+        animated: emphasized,
+        markerEnd: { type: MarkerType.ArrowClosed, width: emphasized ? 24 : 20, height: emphasized ? 24 : 20, color: tone.color },
+        style: { stroke: tone.color, strokeWidth: emphasized ? 3 : 1.8, opacity: dimmed ? 0.12 : 1 },
+        label: edge.constraint,
+        labelStyle: { fill: tone.color, fontSize: 11, fontWeight: 700, opacity: dimmed ? 0.15 : 1 },
+        labelBgStyle: { fill: "#020617", fillOpacity: dimmed ? 0.2 : 0.88 },
+        labelBgBorderRadius: 10,
+        labelBgPadding: [8, 4] as [number, number],
+      } satisfies Edge<Relationship>;
+    });
+
+    const manual = manualEdges
+      .filter((me) => visibleTableSet.has(me.source) && visibleTableSet.has(me.target))
+      .map((me) => {
+        const emphasized = highlighted?.edgeIds.has(me.id) ?? false;
+        const dimmed = highlighted ? !emphasized : false;
+        const fakeData: Relationship = { id: me.id, source: me.source, target: me.target, scope: "", constraint: `manual:${me.id}`, columns: [] };
+        return {
+          id: me.id,
+          source: me.source,
+          target: me.target,
+          sourceHandle: `s-${graphLayout.sourceHandleIndex.get(me.id) ?? 0}`,
+          targetHandle: `t-${graphLayout.targetHandleIndex.get(me.id) ?? 0}`,
+          data: fakeData,
+          zIndex: emphasized ? 1000 : 0,
+          animated: emphasized,
+          markerEnd: { type: MarkerType.ArrowClosed, width: emphasized ? 22 : 18, height: emphasized ? 22 : 18, color: "#f59e0b" },
+          style: { stroke: "#f59e0b", strokeWidth: emphasized ? 2.6 : 1.6, strokeDasharray: "6 3", opacity: dimmed ? 0.12 : 1 },
+          label: "manual",
+          labelStyle: { fill: "#f59e0b", fontSize: 10, fontWeight: 700, opacity: dimmed ? 0.15 : 1 },
+          labelBgStyle: { fill: "#020617", fillOpacity: dimmed ? 0.2 : 0.88 },
+          labelBgBorderRadius: 10,
+          labelBgPadding: [6, 3] as [number, number],
+        } satisfies Edge<Relationship>;
+      });
+
+    return [...intrinsic, ...manual];
+  }, [graphLayout, highlighted, manualEdges, payload?.edges, tableGroupMap, visibleTableSet]);
+
+  const layoutedNodes = useMemo(
+    () =>
+      visibleTables.map((table) => {
+        const position = graphLayout.positions.get(table.id) ?? { x: 0, y: 0 };
+        const involved = highlighted?.nodeIds.has(table.id) ?? false;
+        const hasRelations = (graphLayout.sourceDegree.get(table.id) ?? 0) + (graphLayout.targetDegree.get(table.id) ?? 0) > 0;
+        const searchDimmed = highlightedTableSet.size > 0 && !highlightedTableSet.has(table.id);
+        const dimOpacity = highlighted ? (involved ? 1 : 0.3) : searchDimmed ? 0.5 : 1;
+        return {
+          id: table.id,
+          type: "table",
+          position,
+          sourcePosition: layoutDirection === "LR" ? Position.Right : Position.Bottom,
+          targetPosition: layoutDirection === "LR" ? Position.Left : Position.Top,
+          data: {
+            label: table.label,
+            schema: table.schema,
+            scope: tableGroupMap.get(table.id) ?? table.scope,
+            columns: table.columns,
+            highlighted: highlightedTableSet.has(table.id),
+            emphasized: highlighted ? involved : false,
+            dimOpacity,
+            selected: table.id === selectedNodeId,
+            layoutDirection,
+            hasRelations,
+            targetHandlePositions: graphLayout.targetHandlePositions.get(table.id) ?? [0.5],
+            sourceHandlePositions: graphLayout.sourceHandlePositions.get(table.id) ?? [0.5],
+            onShowRelations: showAllRelationsFor,
+          },
+        } satisfies Node<NodeData>;
+      }),
+    [graphLayout, highlighted, highlightedTableSet, layoutDirection, selectedNodeId, showAllRelationsFor, tableGroupMap, visibleTables]
+  );
 
   useEffect(() => {
     setRfNodes(layoutedNodes);
@@ -557,9 +1001,22 @@ export default function DiagramScopeView({ connectionId }: Props) {
   }, [connectionId, currentPreferences, preferencesLoaded]);
 
   const handleNodeClick = useCallback<NodeMouseHandler>((_event, node) => {
+    if (linkMode) {
+      if (!linkSource) {
+        setLinkSource(node.id);
+        return;
+      }
+      if (linkSource !== node.id) {
+        const id = `manual:${linkSource}\u2192${node.id}:${Date.now()}`;
+        setManualEdges((prev) => [...prev, { id, source: linkSource, target: node.id }]);
+      }
+      setLinkSource(null);
+      setLinkMode(false);
+      return;
+    }
     setSelectedNodeId(node.id);
     setSelectedEdgeId(null);
-  }, []);
+  }, [linkMode, linkSource]);
   const handleEdgeClick = useCallback<EdgeMouseHandler>((_event, edge) => {
     setSelectedEdgeId(edge.id);
     setSelectedNodeId(null);
@@ -579,10 +1036,23 @@ export default function DiagramScopeView({ connectionId }: Props) {
     void reactFlowInstance.setCenter(node.position.x + NODE_W / 2, node.position.y + NODE_H / 2, { zoom: Math.max(reactFlowInstance.getZoom(), 0.9), duration: 300 });
   }, [reactFlowInstance, rfNodes]);
 
-  const selectNeighbors = useCallback(() => {
+  const selectedNodeNeighborIds = useMemo(
+    () => (selectedNodeId ? expandNeighbors([selectedNodeId], adjacency, scopeDepth) : new Set<string>()),
+    [selectedNodeId, adjacency, scopeDepth]
+  );
+
+  const removeManualEdge = useCallback((edgeId: string) => {
+    setManualEdges((prev) => prev.filter((e) => e.id !== edgeId));
+    setSelectedEdgeId(null);
+  }, []);
+
+  const toggleNeighbors = useCallback(() => {
     if (!selectedNodeId) return;
-    setSelectedTableIds(Array.from(expandNeighbors([selectedNodeId], adjacency, scopeDepth)));
-  }, [adjacency, scopeDepth, selectedNodeId]);
+    const neighborArr = Array.from(selectedNodeNeighborIds);
+    const alreadyActive =
+      selectedTableIds.length > 0 && selectedTableIds.every((id) => selectedNodeNeighborIds.has(id));
+    setSelectedTableIds(alreadyActive ? [] : neighborArr);
+  }, [selectedNodeId, selectedNodeNeighborIds, selectedTableIds]);
 
   const saveLayout = useCallback(async () => {
     const name = window.prompt("Nome do layout", `Layout ${new Date().toLocaleString("pt-BR")}`)?.trim();
@@ -635,45 +1105,190 @@ export default function DiagramScopeView({ connectionId }: Props) {
 
   return (
     <>
-      <div ref={canvasRef} className={`relative w-full overflow-hidden bg-slate-950 ${isFullscreen ? "h-screen" : "h-[calc(100vh-120px)] min-h-[820px]"}`}>
-        <div className="absolute inset-x-0 top-0 z-20 border-b border-white/10 bg-slate-950/85 px-4 py-3 backdrop-blur-md">
+      <div ref={canvasRef} className={`relative w-full overflow-hidden bg-[var(--color-bg-canvas)] ${isFullscreen ? "h-screen" : "h-[calc(100vh-120px)] min-h-[820px]"}`}>
+        <div
+          ref={(el) => {
+            toolbarRef.current = el;
+            if (el) {
+              const observer = new ResizeObserver(() => setToolbarHeight(el.offsetHeight));
+              observer.observe(el);
+            }
+          }}
+          className="absolute inset-x-0 top-0 z-20 border-b border-[var(--color-border-subtle)] bg-[color-mix(in_srgb,var(--color-bg-layer-1)_90%,transparent)] px-4 py-3 backdrop-blur-md"
+        >
+          {/* Linha 1: título + busca + ações principais */}
           <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
-            <div className="flex flex-wrap items-center gap-2">
-              <h3 className="mr-3 text-sm font-semibold text-slate-100">Relational diagram workspace</h3>
-              <span className="rounded-full border border-slate-800 bg-slate-900/80 px-3 py-1 text-xs text-slate-400">{status === "loading" ? "Loading..." : `${visibleTables.length} tables`}</span>
-              <span className="rounded-full border border-slate-800 bg-slate-900/80 px-3 py-1 text-xs text-slate-400">{edges.length} relationships</span>
+            <div className="flex flex-wrap items-center gap-2 text-[var(--color-text-primary)]">
+              <h3 className="mr-2 text-sm font-semibold">Diagrama relacional</h3>
+              <span className="rounded-full border border-[var(--color-border-subtle)] bg-[var(--color-bg-layer-2)] px-3 py-1 text-xs text-[var(--color-text-secondary)]">
+                {status === "loading" ? "Carregando..." : `${visibleTables.length} tabelas`}
+              </span>
+              <span className="rounded-full border border-[var(--color-border-subtle)] bg-[var(--color-bg-layer-2)] px-3 py-1 text-xs text-[var(--color-text-secondary)]">
+                {edges.length} relações
+              </span>
             </div>
             <div className="flex flex-wrap items-center gap-2">
-              <input value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} placeholder="Search table, schema or column" className="w-full rounded-2xl border border-white/10 bg-white/5 px-4 py-2.5 text-sm text-slate-100 outline-none transition focus:border-cyan-400/50 sm:w-[260px]" />
-              <button onClick={() => setShowFilters(true)} className="rounded-2xl border border-cyan-500/30 bg-cyan-500/10 px-4 py-2.5 text-sm font-semibold text-cyan-100 transition hover:bg-cyan-500/20">Filters</button>
-              <button onClick={() => void reactFlowInstance?.fitView({ padding: 0.14, duration: 320 })} className="rounded-2xl border border-white/10 bg-white/5 px-4 py-2.5 text-sm font-semibold text-slate-200 transition hover:bg-white/10">Fit view</button>
-              <button onClick={toggleFullscreen} className="rounded-2xl border border-white/10 bg-white/5 px-4 py-2.5 text-sm font-semibold text-slate-200 transition hover:bg-white/10">{isFullscreen ? "Exit fullscreen" : "Fullscreen"}</button>
+              <input
+                value={searchQuery}
+                onChange={(event) => setSearchQuery(event.target.value)}
+                placeholder="Buscar tabela, schema ou coluna"
+                className="w-full rounded-2xl border border-[var(--color-border-subtle)] bg-[var(--color-bg-layer-2)] px-4 py-2.5 text-sm text-[var(--color-text-primary)] outline-none transition focus:border-[var(--color-accent)] sm:w-[280px]"
+              />
+              <button onClick={() => setShowFilters(true)} className="rounded-2xl border border-[var(--color-accent)] bg-[var(--color-accent-soft)] px-4 py-2.5 text-sm font-semibold text-[var(--color-accent)] transition hover:bg-[color-mix(in_srgb,var(--color-accent-soft)_90%,var(--color-accent))]">
+                Filtros
+              </button>
+              <button onClick={() => void reactFlowInstance?.fitView({ padding: 0.14, duration: 320 })} className="rounded-2xl border border-[var(--color-border-subtle)] bg-[var(--color-bg-layer-2)] px-4 py-2.5 text-sm font-semibold text-[var(--color-text-primary)] transition hover:border-[var(--color-accent)]">
+                Ajustar tela
+              </button>
+              <button onClick={toggleFullscreen} className="rounded-2xl border border-[var(--color-border-subtle)] bg-[var(--color-bg-layer-2)] px-4 py-2.5 text-sm font-semibold text-[var(--color-text-primary)] transition hover:border-[var(--color-accent)]">
+                {isFullscreen ? "Sair do fullscreen" : "Fullscreen"}
+              </button>
+              <ThemeToggle />
             </div>
           </div>
-          <div className="mt-3 flex flex-wrap items-center gap-2">
-            <div className="flex items-center overflow-hidden rounded-2xl border border-white/10 bg-white/5">
-              {(["TB", "LR"] as const).map((direction) => <button key={direction} onClick={() => { setLayoutDirection(direction); setManualPositions(new Map()); }} className={`px-3 py-2 text-xs font-semibold transition ${layoutDirection === direction ? "bg-cyan-400 text-slate-950" : "text-slate-300 hover:bg-white/10"}`}>{direction}</button>)}
+
+          {/* Linha 2: controles de layout agrupados com separadores */}
+          <div className="mt-3 flex flex-wrap items-center gap-2 text-[var(--color-text-primary)]">
+            {/* Grupo: direção do layout */}
+            <div className="flex items-center overflow-hidden rounded-2xl border border-[var(--color-border-subtle)] bg-[var(--color-bg-layer-2)]">
+              {(["TB", "LR"] as const).map((direction) => (
+                <button
+                  key={direction}
+                  onClick={() => { setLayoutDirection(direction); setManualPositions(new Map()); }}
+                  className={`px-3 py-2 text-xs font-semibold transition ${layoutDirection === direction ? "bg-[var(--color-accent)] text-[var(--color-text-inverse)]" : "text-[var(--color-text-secondary)] hover:bg-[color-mix(in_srgb,var(--color-bg-layer-2)_85%,var(--color-accent)_15%)]"}`}
+                  title={direction === "TB" ? "Layout vertical" : "Layout horizontal"}
+                >
+                  {direction === "TB" ? "↕ Vertical" : "↔ Horizontal"}
+                </button>
+              ))}
             </div>
-            <div className="flex items-center overflow-hidden rounded-2xl border border-white/10 bg-white/5">
-              {([{ id: "domain", label: "Domain" }, { id: "schema", label: "Schema" }, { id: "prefix", label: "Prefix" }] as const).map((mode) => <button key={mode.id} onClick={() => setGroupingMode(mode.id)} className={`px-3 py-2 text-xs font-semibold transition ${groupingMode === mode.id ? "bg-white text-slate-950" : "text-slate-300 hover:bg-white/10"}`}>{mode.label}</button>)}
+
+            <span className="h-5 w-px bg-[var(--color-border-subtle)]" />
+
+            {/* Grupo: modo de agrupamento */}
+            <div className="flex items-center overflow-hidden rounded-2xl border border-[var(--color-border-subtle)] bg-[var(--color-bg-layer-2)]">
+              {([{ id: "domain", label: "Domínio" }, { id: "schema", label: "Schema" }, { id: "prefix", label: "Prefixo" }] as const).map((mode) => (
+                <button
+                  key={mode.id}
+                  onClick={() => setGroupingMode(mode.id)}
+                  className={`px-3 py-2 text-xs font-semibold transition ${groupingMode === mode.id ? "bg-[var(--color-accent)] text-[var(--color-text-inverse)]" : "text-[var(--color-text-secondary)] hover:bg-[color-mix(in_srgb,var(--color-bg-layer-2)_85%,var(--color-accent)_15%)]"}`}
+                >
+                  {mode.label}
+                </button>
+              ))}
             </div>
-            <div className="flex items-center gap-2 rounded-2xl border border-white/10 bg-white/5 px-3 py-2">
-              <span className="text-xs font-semibold uppercase tracking-[0.18em] text-slate-500">Depth</span>
-              <select value={scopeDepth} onChange={(event) => setScopeDepth(Number(event.target.value))} className="bg-transparent text-sm text-slate-100 outline-none">{[1, 2, 3, 4, 5].map((depth) => <option key={depth} value={depth} className="bg-slate-950">{depth}</option>)}</select>
+
+            <span className="h-5 w-px bg-[var(--color-border-subtle)]" />
+
+            {/* Grupo: profundidade de vizinhança */}
+            <div className="flex items-center gap-2 rounded-2xl border border-[var(--color-border-subtle)] bg-[var(--color-bg-layer-2)] px-3 py-2">
+              <span className="text-xs font-semibold uppercase tracking-[0.18em] text-[var(--color-text-muted)]">Profundidade</span>
+              <select value={scopeDepth} onChange={(event) => setScopeDepth(Number(event.target.value))} className="bg-transparent text-sm text-[var(--color-text-primary)] outline-none">
+                {[1, 2, 3, 4, 5].map((depth) => <option key={depth} value={depth} className="bg-[var(--color-bg-layer-1)] text-[var(--color-text-primary)]">{depth}</option>)}
+              </select>
             </div>
-            <label className="flex items-center gap-2 rounded-2xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-slate-300">
-              <input type="checkbox" checked={minimap} onChange={(event) => setMinimap(event.target.checked)} className="h-4 w-4 rounded border-slate-700 bg-slate-900 text-cyan-400" />
-              Mini map
+
+            {/* Minimapa */}
+            <label className="flex cursor-pointer items-center gap-2 rounded-2xl border border-[var(--color-border-subtle)] bg-[var(--color-bg-layer-2)] px-3 py-2 text-sm text-[var(--color-text-secondary)] transition hover:border-[var(--color-accent)]">
+              <input type="checkbox" checked={minimap} onChange={(event) => setMinimap(event.target.checked)} className="h-4 w-4 rounded border-[var(--color-border-subtle)] bg-[var(--color-bg-layer-1)] text-[var(--color-accent)]" />
+              Minimapa
             </label>
-            <button onClick={saveLayout} className="rounded-2xl border border-white/10 bg-white/5 px-4 py-2 text-sm font-semibold text-slate-200 transition hover:bg-white/10">Save layout</button>
-            <button onClick={exportCurrentDiagram} className="rounded-2xl border border-white/10 bg-white/5 px-4 py-2 text-sm font-semibold text-slate-200 transition hover:bg-white/10">Export JSON</button>
-            <button onClick={() => { setSelectedEdgeId(null); setSelectedNodeId(null); setSelectedScopeIds([]); setSelectedTableIds([]); setSearchQuery(""); setManualPositions(new Map()); }} className="rounded-2xl border border-white/10 bg-white/5 px-4 py-2 text-sm font-semibold text-slate-400 transition hover:bg-white/10 hover:text-slate-200">Reset</button>
+
+            <span className="h-5 w-px bg-[var(--color-border-subtle)]" />
+
+            {/* Ações secundárias */}
+            <button
+              onClick={() => {
+                setLinkMode((prev) => {
+                  if (prev) { setLinkSource(null); }
+                  return !prev;
+                });
+              }}
+              className={`rounded-2xl border px-4 py-2 text-sm font-semibold transition ${
+                linkMode
+                  ? "border-[color-mix(in_srgb,var(--color-warning)_45%,transparent)] bg-[color-mix(in_srgb,var(--color-warning)_18%,var(--color-bg-layer-1))] text-[var(--color-warning)]"
+                  : "border-[var(--color-border-subtle)] bg-[var(--color-bg-layer-2)] text-[var(--color-text-primary)] hover:border-[var(--color-accent)]"
+              }`}
+              title={linkMode ? "Cancelar modo de ligação" : "Ativar modo: clique em dois nós para criar FK manual"}
+            >
+              {linkMode ? (linkSource ? "Selecione o destino..." : "Selecione a origem...") : "Ligar FK"}
+            </button>
+            <button onClick={saveLayout} className="rounded-2xl border border-[var(--color-border-subtle)] bg-[var(--color-bg-layer-2)] px-4 py-2 text-sm font-semibold text-[var(--color-text-primary)] transition hover:border-[var(--color-accent)]">Salvar layout</button>
+            <button onClick={exportCurrentDiagram} className="rounded-2xl border border-[var(--color-border-subtle)] bg-[var(--color-bg-layer-2)] px-4 py-2 text-sm font-semibold text-[var(--color-text-primary)] transition hover:border-[var(--color-accent)]">Exportar JSON</button>
+            <button
+              onClick={() => { setSelectedEdgeId(null); setSelectedNodeId(null); setSelectedScopeIds([]); setSelectedTableIds([]); setSearchQuery(""); setManualPositions(new Map()); setLinkMode(false); setLinkSource(null); }}
+              className="rounded-2xl border border-[var(--color-border-subtle)] bg-[var(--color-bg-layer-2)] px-4 py-2 text-sm font-semibold text-[var(--color-text-secondary)] transition hover:border-[var(--color-accent)]"
+            >
+              Resetar
+            </button>
           </div>
         </div>
 
-        {status === "error" ? <div className="flex h-full items-center justify-center px-6 pt-24"><div className="max-w-xl rounded-3xl border border-red-500/20 bg-red-950/20 px-6 py-5 text-center text-sm text-red-100">{errorMessage ?? "Unable to load the current diagram."}</div></div> : null}
-        {status === "loading" ? <div className="flex h-full items-center justify-center pt-24 text-sm text-slate-400">Building diagram...</div> : null}
-        {status === "idle" && rfNodes.length === 0 ? <div className="flex h-full items-center justify-center px-6 pt-24"><div className="max-w-xl rounded-3xl border border-dashed border-white/10 bg-white/5 px-6 py-6 text-center text-sm text-slate-400">No tables match the current scope or table filters.</div></div> : null}
+        {status === "error" ? (
+          <div className="flex h-full items-center justify-center px-6 pt-24">
+            <div className="max-w-xl rounded-3xl border border-red-500/30 bg-red-500/10 px-6 py-5 text-center text-sm text-red-600">
+              {errorMessage ?? "Não foi possível carregar o diagrama."}
+            </div>
+          </div>
+        ) : null}
+
+        {status === "loading" ? (
+          <div className="flex h-full items-center justify-center pt-24 text-sm text-[var(--color-text-muted)]">Montando diagrama...</div>
+        ) : null}
+
+        {status === "idle" && rfNodes.length === 0 ? (
+          <div className="flex h-full items-center justify-center px-6 pt-24">
+            <div className="flex max-w-xl flex-col items-center gap-4 rounded-3xl border border-dashed border-[var(--color-border-subtle)] bg-[var(--color-bg-layer-2)] px-8 py-8 text-center">
+              <p className="text-sm text-[var(--color-text-secondary)]">Nenhuma tabela encontrada para o escopo ou filtros ativos.</p>
+              <button
+                onClick={() => {
+                  setSelectedScopeIds([]);
+                  setSelectedTableIds([]);
+                  setSearchQuery("");
+ }}
+                className="rounded-2xl border border-cyan-500/30 bg-cyan-500/10 px-5 py-2.5 text-sm font-semibold text-cyan-100 transition hover:bg-cyan-500/20"
+              >
+                Limpar filtros
+              </button>
+            </div>
+          </div>
+        ) : null}
+
+        {linkMode ? (
+          <div className="pointer-events-none absolute inset-x-0 z-10 flex justify-center" style={{ top: toolbarHeight + 12 }}>
+            <div
+              className="flex items-center gap-3 rounded-2xl border px-5 py-3 text-sm shadow-2xl backdrop-blur-md"
+              style={{
+                borderColor: "color-mix(in srgb, var(--color-warning) 45%, transparent)",
+                background: "color-mix(in srgb, var(--color-warning) 15%, var(--color-bg-layer-1))",
+                color: "var(--color-warning)",
+              }}
+            >
+              <span className="h-2 w-2 animate-pulse rounded-full" style={{ background: "var(--color-warning)" }} />
+              {linkSource ? (
+                <>
+                  <span className="font-semibold" style={{ color: "var(--color-text-primary)" }}>Origem:</span>
+                  <span className="font-mono" style={{ color: "var(--color-text-primary)" }}>{linkSource}</span>
+                  <span className="mx-1" style={{ color: "var(--color-warning)" }}>→</span>
+                  <span style={{ color: "var(--color-text-primary)" }}>clique na tabela destino</span>
+                </>
+              ) : (
+                <span style={{ color: "var(--color-text-primary)" }}>Clique na tabela de origem da FK manual</span>
+              )}
+              <button
+                className="pointer-events-auto ml-2 rounded-lg border px-2.5 py-1 text-xs font-semibold"
+                style={{
+                  borderColor: "color-mix(in srgb, var(--color-warning) 35%, transparent)",
+                  background: "color-mix(in srgb, var(--color-warning) 12%, var(--color-bg-layer-1))",
+                  color: "var(--color-warning)",
+                }}
+                onClick={() => { setLinkMode(false); setLinkSource(null); }}
+              >
+                Cancelar
+              </button>
+            </div>
+          </div>
+        ) : null}
 
         {status === "idle" && rfNodes.length > 0 ? (
           <ReactFlow
@@ -683,7 +1298,7 @@ export default function DiagramScopeView({ connectionId }: Props) {
             onNodesChange={onNodesChange}
             onNodeClick={handleNodeClick}
             onEdgeClick={handleEdgeClick}
-            onPaneClick={() => { setSelectedNodeId(null); setSelectedEdgeId(null); }}
+            onPaneClick={() => { if (!linkMode) { setSelectedNodeId(null); setSelectedEdgeId(null); } }}
             onNodeDragStop={handleNodeDragStop}
             onMoveEnd={() => {
               if (!preferencesLoaded) return;
@@ -704,20 +1319,58 @@ export default function DiagramScopeView({ connectionId }: Props) {
             proOptions={{ hideAttribution: true }}
             nodesConnectable={false}
           >
-            <Background variant={BackgroundVariant.Dots} gap={20} size={1.2} color="#1f2937" />
-            {minimap ? <MiniMap pannable zoomable maskColor="rgba(2,6,23,0.82)" nodeColor={(node) => colorFor((node.data as NodeData).scope).color} className="!border !border-slate-800 !bg-slate-950/95" /> : null}
-            <Controls showInteractive={false} className="!border-slate-800 !bg-slate-950/90" />
-            <Panel position="top-left" className="mt-24 w-[320px] rounded-3xl border border-white/10 bg-slate-950/92 p-4 text-sm text-slate-300 shadow-2xl">
-              <p className="text-[10px] uppercase tracking-[0.26em] text-slate-500">Workbench</p>
-              <div className="mt-3 grid gap-3">
-                <div className="rounded-2xl border border-white/10 bg-white/5 p-3"><p className="text-xs text-slate-500">Visible scopes</p><p className="mt-1 font-semibold text-white">{selectedScopeIds.length > 0 ? selectedScopeIds.length : scopes.length}</p></div>
-                <div className="rounded-2xl border border-white/10 bg-white/5 p-3"><p className="text-xs text-slate-500">Depth</p><p className="mt-1 font-semibold text-white">{scopeDepth} hops</p></div>
-                <div className="rounded-2xl border border-white/10 bg-white/5 p-3"><p className="text-xs text-slate-500">Grouping</p><p className="mt-1 font-semibold text-white">{groupingMode}</p></div>
+            <Background variant={BackgroundVariant.Dots} gap={20} size={1.2} color="color-mix(in srgb, var(--color-text-muted) 35%, transparent)" />
+            {minimap ? <MiniMap pannable zoomable maskColor="color-mix(in srgb, var(--color-bg-layer-1) 88%, #000)" nodeColor={(node) => colorFor((node.data as NodeData).scope).color} className="!border !border-[var(--color-border-subtle)] !bg-[var(--color-bg-layer-1)]/95" /> : null}
+            <Controls showInteractive={false} className="!border-[var(--color-border-subtle)] !bg-[var(--color-bg-layer-1)]/90 !text-[var(--color-text-primary)]" />
+            <Panel position="top-left" style={{ marginTop: toolbarHeight + 12 }} className="w-[320px] rounded-3xl border border-[var(--color-border-subtle)] bg-[var(--color-bg-layer-1)]/95 p-4 text-sm text-[var(--color-text-primary)] shadow-[var(--shadow-floating)]">
+              <p className="text-[10px] uppercase tracking-[0.26em] text-[var(--color-text-muted)]">Workbench</p>
+              <div className="mt-3 flex flex-col gap-2">
+                <button
+                  onClick={() => setShowFilters(true)}
+                  className="rounded-2xl border border-white/10 bg-white/5 px-3 py-2 text-left text-sm text-slate-200 transition hover:bg-white/10"
+                >
+                  Escopos visíveis
+                </button>
+                <div className="rounded-2xl border border-white/10 bg-white/5 p-3">
+                  <p className="text-xs text-slate-500">Profundidade</p>
+                  <p className="mt-1 font-semibold text-white">{scopeDepth} saltos</p>
+                </div>
+                <div className="rounded-2xl border border-white/10 bg-white/5 p-3">
+                  <p className="text-xs text-slate-500">Agrupamento</p>
+                  <p className="mt-1 font-semibold text-white capitalize">{groupingMode === "domain" ? "Domínio" : groupingMode === "schema" ? "Schema" : "Prefixo"}</p>
+                </div>
               </div>
-              {snapshots.length > 0 ? <div className="mt-4"><p className="text-[10px] uppercase tracking-[0.26em] text-slate-500">Saved layouts</p><div className="mt-3 space-y-2">{snapshots.map((snapshot) => <button key={snapshot.id} onClick={() => restoreSnapshot(snapshot)} className="w-full rounded-2xl border border-white/10 bg-white/5 px-3 py-3 text-left transition hover:bg-white/10"><p className="truncate font-semibold text-white">{snapshot.name}</p><p className="mt-1 text-xs text-slate-500">{new Date(snapshot.createdAt).toLocaleString("pt-BR")}</p></button>)}</div></div> : null}
+              {snapshots.length > 0 ? (
+                <div className="mt-4">
+                  <p className="text-[10px] uppercase tracking-[0.26em] text-slate-500">Layouts salvos</p>
+                  <div className="mt-3 space-y-2">
+                    {snapshots.map((snapshot) => (
+                      <button key={snapshot.id} onClick={() => restoreSnapshot(snapshot)} className="w-full rounded-2xl border border-white/10 bg-white/5 px-3 py-3 text-left transition hover:bg-white/10">
+                        <p className="truncate font-semibold text-white">{snapshot.name}</p>
+                        <p className="mt-1 text-xs text-slate-500">{new Date(snapshot.createdAt).toLocaleString("pt-BR")}</p>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
             </Panel>
-            {selectedNode ? <Panel position="top-right" className="mt-24 w-[360px] rounded-3xl border border-white/10 bg-slate-950/92 p-4 text-sm text-slate-300 shadow-2xl"><p className="text-[10px] uppercase tracking-[0.26em] text-slate-500">Selected table</p><h4 className="mt-2 text-lg font-semibold text-white">{selectedNode.label}</h4><p className="mt-1 font-mono text-xs text-slate-500">{selectedNode.schema}</p><div className="mt-4 grid gap-2 sm:grid-cols-2"><button onClick={() => focusTable(selectedNode.id)} className="rounded-2xl border border-white/10 bg-white/5 px-3 py-2 text-sm font-semibold text-slate-200 transition hover:bg-white/10">Focus table</button><button onClick={selectNeighbors} className="rounded-2xl border border-cyan-500/30 bg-cyan-500/10 px-3 py-2 text-sm font-semibold text-cyan-100 transition hover:bg-cyan-500/20">Select neighbors</button></div><div className="mt-4 rounded-2xl border border-white/10 bg-white/5 p-3"><p className="text-xs text-slate-500">Columns</p><p className="mt-1 font-semibold text-white">{selectedNode.columns.length}</p></div></Panel> : null}
-            {selectedEdge ? <Panel position="bottom-right" className="mb-4 w-[380px] rounded-3xl border border-white/10 bg-slate-950/92 p-4 text-sm text-slate-300 shadow-2xl"><p className="text-[10px] uppercase tracking-[0.26em] text-slate-500">Relationship details</p><h4 className="mt-2 text-base font-semibold text-white">{selectedEdge.data?.constraint}</h4><p className="mt-1 font-mono text-xs text-slate-500">{selectedEdge.source} to {selectedEdge.target}</p><div className="mt-4 grid gap-3 sm:grid-cols-2"><div className="rounded-2xl border border-white/10 bg-white/5 p-3"><p className="text-xs text-slate-500">Cardinality</p><p className="mt-1 font-semibold text-white">{selectedEdge.data?.cardinality ?? "Not informed"}</p></div><div className="rounded-2xl border border-white/10 bg-white/5 p-3"><p className="text-xs text-slate-500">Delete / update</p><p className="mt-1 text-white">{selectedEdge.data?.onDelete ?? "Default"} / {selectedEdge.data?.onUpdate ?? "Default"}</p></div></div><div className="mt-4 rounded-2xl border border-white/10 bg-white/5 p-3"><p className="text-xs text-slate-500">Column mapping</p><div className="mt-2 space-y-2">{selectedEdge.data?.columns.map((pair) => <div key={`${pair.source}-${pair.target}`} className="flex items-center justify-between gap-3 text-xs"><span className="font-mono text-cyan-200">{pair.source}</span><span className="text-slate-500">to</span><span className="font-mono text-emerald-200">{pair.target}</span></div>)}</div></div></Panel> : null}
+            {selectedNode ? (
+              <NodePanel
+                node={selectedNode}
+                selectedTableIds={selectedTableIds}
+                neighborIds={selectedNodeNeighborIds}
+                toolbarHeight={toolbarHeight}
+                onFocus={() => focusTable(selectedNode.id)}
+                onToggleNeighbors={toggleNeighbors}
+                onClose={() => setSelectedNodeId(null)}
+              />
+            ) : null}
+            {selectedEdge ? (
+              <EdgePanel
+                edge={selectedEdge}
+                onRemove={selectedEdge.data?.constraint?.startsWith("manual:") ? () => removeManualEdge(selectedEdge.id) : undefined}
+              />
+            ) : null}
           </ReactFlow>
         ) : null}
       </div>

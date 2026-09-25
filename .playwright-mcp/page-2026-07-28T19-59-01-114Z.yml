@@ -1,0 +1,86 @@
+- generic [active] [ref=f2e1]:
+  - generic [ref=f2e3]:
+    - navigation [ref=f2e4]:
+      - link "Workspaces" [ref=f2e5] [cursor=pointer]:
+        - /url: /
+      - text: /migration/editor
+    - banner [ref=f2e6]:
+      - generic [ref=f2e7]:
+        - paragraph [ref=f2e8]: MIGRATIONS
+        - heading "migration" [level=1] [ref=f2e9]
+        - paragraph [ref=f2e10]: (migrations):0 · migration
+      - generic [ref=f2e11]:
+        - generic [ref=f2e12]: migrations
+        - generic [ref=f2e13]: Online
+    - generic [ref=f2e14]:
+      - generic [ref=f2e16]:
+        - generic [ref=f2e17]:
+          - generic [ref=f2e18]:
+            - link "Editor SQL" [ref=f2e19] [cursor=pointer]:
+              - /url: /workspace/cms51osir000340goe06aiug9?tab=editor
+            - link "Explorer" [ref=f2e20] [cursor=pointer]:
+              - /url: /workspace/cms51osir000340goe06aiug9?tab=explorer
+            - link "Diagramas" [ref=f2e21] [cursor=pointer]:
+              - /url: /workspace/cms51osir000340goe06aiug9?tab=diagram
+            - link "Migrations" [ref=f2e22] [cursor=pointer]:
+              - /url: /workspace/cms51osir000340goe06aiug9?tab=migrations
+            - link "Admin" [ref=f2e23] [cursor=pointer]:
+              - /url: /workspace/cms51osir000340goe06aiug9?tab=admin
+          - button "Marcar aba atual como favorita" [ref=f2e25]
+        - generic [ref=f2e26]:
+          - generic [ref=f2e27]:
+            - generic [ref=f2e28]:
+              - paragraph [ref=f2e29]: Workspace / Migrations
+              - heading "Importar migrations e gerar diagramas" [level=2] [ref=f2e30]
+              - paragraph [ref=f2e31]: Envie arquivos .sql de migrations (Flyway, golang-migrate, SQL puro) e o sistema reconstrói o schema e gera diagramas por snapshot.
+            - generic [ref=f2e32]:
+              - generic [ref=f2e33]:
+                - generic [ref=f2e34]:
+                  - text: Nome do package
+                  - 'textbox "Ex: Spring Petclinic migrations" [ref=f2e35]'
+                - generic [ref=f2e36]:
+                  - button "Selecionar arquivos .sql" [ref=f2e37]
+                  - button "Importar" [disabled] [ref=f2e38]
+              - paragraph [ref=f2e39]: "Arraste arquivos .sql aqui ou clique em selecionar. Limite: 250 arquivos, 10MB total."
+          - generic [ref=f2e40]:
+            - generic [ref=f2e41]:
+              - heading "Packages importados" [level=3] [ref=f2e42]
+              - button "Atualizar" [ref=f2e43]
+            - paragraph [ref=f2e44]: Carregando...
+      - complementary [ref=f2e45]:
+        - generic [ref=f2e46]:
+          - heading "Resumo" [level=2] [ref=f2e47]
+          - generic [ref=f2e48]:
+            - generic [ref=f2e49]:
+              - term [ref=f2e50]: Host
+              - definition [ref=f2e51]: (migrations)
+            - generic [ref=f2e52]:
+              - term [ref=f2e53]: Usuário
+              - definition [ref=f2e54]: (migrations)
+            - generic [ref=f2e55]:
+              - term [ref=f2e56]: Database
+              - definition [ref=f2e57]: migration
+            - generic [ref=f2e58]:
+              - term [ref=f2e59]: Último teste
+              - definition [ref=f2e60]: 28/07/2026, 16:42:21
+        - generic [ref=f2e61]:
+          - heading "Eventos recentes" [level=2] [ref=f2e62]
+          - generic [ref=f2e63]:
+            - generic [ref=f2e64]:
+              - paragraph [ref=f2e65]: SQL_QUERY_FAILED
+              - paragraph [ref=f2e66]: "{\"sql\":\"SHOW TABLES\",\"error\":\"getaddrinfo ENOTFOUND (migrations)\"}"
+              - paragraph [ref=f2e67]: 28/07/2026, 16:49:50
+            - generic [ref=f2e68]:
+              - paragraph [ref=f2e69]: SQL_QUERY_FAILED
+              - paragraph [ref=f2e70]: "{\"sql\":\"SHOW TABLES\",\"error\":\"getaddrinfo ENOTFOUND (migrations)\"}"
+              - paragraph [ref=f2e71]: 28/07/2026, 16:49:48
+            - generic [ref=f2e72]:
+              - paragraph [ref=f2e73]: SQL_QUERY_FAILED
+              - paragraph [ref=f2e74]: "{\"sql\":\"SHOW TABLES\",\"error\":\"getaddrinfo ENOTFOUND (migrations)\"}"
+              - paragraph [ref=f2e75]: 28/07/2026, 16:25:40
+            - generic [ref=f2e76]:
+              - paragraph [ref=f2e77]: MIGRATION_PROJECT_CREATED
+              - paragraph [ref=f2e78]: migration (74 arquivos, flyway)
+              - paragraph [ref=f2e79]: 28/07/2026, 16:24:42
+  - button "Open Next.js Dev Tools" [ref=f2e85] [cursor=pointer]
+  - alert [ref=f2e89]
