@@ -5,7 +5,8 @@ set -e
 : "${DATABASE_URL:=file:/data/dev.db}"
 
 echo "[entrypoint] Aplicando migrations Prisma..."
-npx prisma migrate deploy
+# Na imagem standalone não há node_modules/.bin — chama o CLI direto via node.
+/usr/local/bin/node ./node_modules/prisma/build/index.js migrate deploy
 
 echo "[entrypoint] Subindo servidor..."
 exec "$@"
