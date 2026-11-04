@@ -1,6 +1,7 @@
 import { Client, type ClientConfig } from "pg";
 
 import { PROVIDER_META } from "@/lib/db/provider-meta";
+import { buildSslOption } from "@/lib/db/tls";
 import { HttpError } from "@/lib/errors";
 import type { DiagramResponse } from "@/lib/types/diagram";
 
@@ -34,8 +35,9 @@ async function connect(config: DriverConnectionConfig, extra?: Partial<ClientCon
     user: config.username,
     password: config.password,
     database: config.database,
-    // Provedores gerenciados (RDS, Supabase, Neon) exigem TLS mas usam CA própria.
-    ssl: process.env.POSTGRES_SSL === "true" ? { rejectUnauthorized: false } : undefined,
+    // Provedores gerenciados (RDS, Supabase, Neon) exigem TLS — certificado verificado
+    // por padrão; use POSTGRES_CA_CERT para CA própria.
+    ssl: buildSslOption("POSTGRES"),
     ...extra,
   });
   await client.connect();

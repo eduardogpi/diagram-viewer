@@ -1,6 +1,7 @@
 import mysql, { type FieldPacket, type RowDataPacket } from "mysql2/promise";
 
 import { PROVIDER_META } from "@/lib/db/provider-meta";
+import { buildSslOption } from "@/lib/db/tls";
 import { HttpError } from "@/lib/errors";
 import type { DiagramResponse } from "@/lib/types/diagram";
 
@@ -28,7 +29,7 @@ function connect(config: DriverConnectionConfig, extra?: mysql.ConnectionOptions
     user: config.username,
     password: config.password,
     database: config.database,
-    ssl: process.env.MYSQL_SSL === "true" ? { rejectUnauthorized: false } : undefined,
+    ssl: buildSslOption("MYSQL"),
     ...extra,
   });
 }
