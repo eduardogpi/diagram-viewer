@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 
 import { requireCurrentUserId } from "@/lib/auth/session";
 import { errorResponse } from "@/lib/errors";
+import { rateLimit } from "@/lib/security/rate-limit";
 import { postAiModelingTurn } from "@/lib/services/ai-modeling";
 import { findConnectionForUser } from "@/lib/services/connections";
 import { logConnectionAudit } from "@/lib/services/workspace";
@@ -13,6 +14,15 @@ export async function POST(
   try {
     const userId = await requireCurrentUserId();
     const { connectionId, sessionId } = await params;
+
+    const rl = rateLimit("ai", userId);
+    if (!rl.allowed) {
+      return NextResponse.json(
+        { error: "Limite de mensagens de modelagem atingido. Aguarde alguns instantes." },
+        { status: 429, headers: rl.retryAfterMs ? { "Retry-After": String(Math.ceil(rl.retryAfterMs / 1000)) } : undefined }
+      );
+    }
+
     const connection = await findConnectionForUser(connectionId, userId);
     if (!connection) {
       return NextResponse.json({ error: "Conexão não encontrada" }, { status: 404 });

@@ -98,15 +98,18 @@ export async function updateDiagramPreferences(
   });
 }
 
-export async function listRecentConnectionEvents(connectionId: string) {
+export async function listRecentConnectionEvents(connectionId: string, limit = 6, offset = 0) {
+  const safeLimit = Math.min(Math.max(limit, 1), 50);
   return prisma.auditLog.findMany({
     where: { connectionId },
     orderBy: { createdAt: "desc" },
-    take: 6,
+    take: safeLimit,
+    skip: Math.max(offset, 0),
   });
 }
 
-export async function listSqlQueryHistory(connectionId: string, userId: string) {
+export async function listSqlQueryHistory(connectionId: string, userId: string, limit = 12, offset = 0) {
+  const safeLimit = Math.min(Math.max(limit, 1), 50);
   const logs = await prisma.auditLog.findMany({
     where: {
       connectionId,
@@ -116,17 +119,21 @@ export async function listSqlQueryHistory(connectionId: string, userId: string) 
       },
     },
     orderBy: { createdAt: "desc" },
-    take: 12,
+    take: safeLimit,
+    skip: Math.max(offset, 0),
   });
 
   return logs
     .map((log) => {
       const payload = safeParseObject(log.context);
+      // Registros antigos tinham `sql` em claro; novos têm `sqlSummary` redatado.
+      const sql = typeof payload.sqlSummary === "string" ? payload.sqlSummary : typeof payload.sql === "string" ? payload.sql : "";
       return {
         id: log.id,
         action: log.action,
         createdAt: log.createdAt.toISOString(),
-        sql: typeof payload.sql === "string" ? payload.sql : "",
+        sql,
+        sqlHash: typeof payload.sqlHash === "string" ? payload.sqlHash : null,
         durationMs: typeof payload.durationMs === "number" ? payload.durationMs : null,
         rowCount: typeof payload.rowCount === "number" ? payload.rowCount : null,
         error: typeof payload.error === "string" ? payload.error : null,
@@ -135,11 +142,13 @@ export async function listSqlQueryHistory(connectionId: string, userId: string) 
     .filter((item) => item.sql);
 }
 
-export async function listLayoutSnapshots(connectionId: string) {
+export async function listLayoutSnapshots(connectionId: string, limit = 10, offset = 0) {
+  const safeLimit = Math.min(Math.max(limit, 1), 50);
   const snapshots = await prisma.layoutSnapshot.findMany({
     where: { connectionId },
     orderBy: { createdAt: "desc" },
-    take: 10,
+    take: safeLimit,
+    skip: Math.max(offset, 0),
   });
 
   return snapshots.map((snapshot) => ({

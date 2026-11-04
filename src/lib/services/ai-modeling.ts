@@ -37,10 +37,13 @@ export type AiModelingTurnDTO = {
   createdAt: string;
 };
 
-export async function listAiModelingSessions(connectionId: string, ownerId: string): Promise<AiModelingSessionDTO[]> {
+export async function listAiModelingSessions(connectionId: string, ownerId: string, limit = 50, offset = 0): Promise<AiModelingSessionDTO[]> {
+  const safeLimit = Math.min(Math.max(limit, 1), 100);
   const sessions = await prisma.aiModelingSession.findMany({
     where: { connectionId, ownerId },
     orderBy: { updatedAt: "desc" },
+    take: safeLimit,
+    skip: Math.max(offset, 0),
   });
   return sessions.map(toSessionDTO);
 }
