@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 
-import { USER_COOKIE_NAME } from "@/lib/auth/session";
+import { USER_COOKIE_NAME, signSessionCookie } from "@/lib/auth/session";
 
 export async function POST(req: NextRequest) {
   if (process.env.NODE_ENV === "production") {
@@ -15,13 +15,14 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Informe um identificador de usuário" }, { status: 400 });
   }
 
+  const { value, maxAge } = signSessionCookie(userId);
   const response = NextResponse.json({ ok: true, userId });
-  response.cookies.set(USER_COOKIE_NAME, userId, {
+  response.cookies.set(USER_COOKIE_NAME, value, {
     httpOnly: true,
     sameSite: "lax",
-    secure: false,
+    secure: (process.env.NODE_ENV as string) === "production",
     path: "/",
-    maxAge: 60 * 60 * 24 * 30,
+    maxAge,
   });
 
   return response;
@@ -36,7 +37,7 @@ export async function DELETE() {
   response.cookies.set(USER_COOKIE_NAME, "", {
     httpOnly: true,
     sameSite: "lax",
-    secure: false,
+    secure: (process.env.NODE_ENV as string) === "production",
     path: "/",
     maxAge: 0,
   });
