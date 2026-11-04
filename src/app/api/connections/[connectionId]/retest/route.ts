@@ -4,6 +4,7 @@ import { requireCurrentUserId } from "@/lib/auth/session";
 import { requireDriver, toDriverConfig } from "@/lib/db/drivers";
 import { errorResponse } from "@/lib/errors";
 import { prisma } from "@/lib/prisma";
+import { assertPublicDbHost } from "@/lib/security/ssrf";
 import { serializeConnectionHealth } from "@/lib/serializers/connection";
 import { findConnectionForUser } from "@/lib/services/connections";
 import { logConnectionAudit } from "@/lib/services/workspace";
@@ -41,6 +42,7 @@ export async function POST(
     }
 
     try {
+      await assertPublicDbHost(connection.host);
       await requireDriver(connection.provider).testConnection(toDriverConfig(connection));
 
       await prisma.credentialSecret.update({

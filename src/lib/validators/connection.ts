@@ -1,12 +1,19 @@
 import { z } from "zod";
 
+import { isPrivateOrReservedHost } from "@/lib/security/ssrf-common";
+
 export const connectionProviders = ["MYSQL", "POSTGRES", "MIGRATIONS"] as const;
 export type ConnectionProvider = (typeof connectionProviders)[number];
 
 export const connectionPayloadSchema = z.object({
   name: z.string().min(3, "Nome obrigatório"),
   provider: z.enum(connectionProviders),
-  host: z.string().min(3),
+  host: z
+    .string()
+    .min(3)
+    .refine((value) => !isPrivateOrReservedHost(value), {
+      message: "Host não permitido: IPs privados, loopback, link-local e hostnames internos são bloqueados (SSRF).",
+    }),
   port: z.coerce.number().int().positive().max(65535),
   database: z.string().min(1),
   /** Só usado por providers que separam database de schema (Postgres); ignorado nos demais. */

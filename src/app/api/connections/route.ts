@@ -5,6 +5,8 @@ import { encryptSecret } from "@/lib/crypto";
 import { findDriver } from "@/lib/db/drivers";
 import { errorResponse, HttpError } from "@/lib/errors";
 import { prisma } from "@/lib/prisma";
+import { rateLimit } from "@/lib/security/rate-limit";
+import { assertPublicDbHost } from "@/lib/security/ssrf";
 import { parseConnectionHealth, parseTagsJson, serializeConnectionHealth, serializeTags } from "@/lib/serializers/connection";
 import { listConnectionsForUser } from "@/lib/services/connections";
 import { logConnectionAudit } from "@/lib/services/workspace";
@@ -21,6 +23,9 @@ async function ensureConnectionWorks(payload: {
 }) {
   // MIGRATIONS não tem banco real por trás — nada a testar.
   if (payload.provider === "MIGRATIONS") return;
+
+  // Anti-SSRF: resolve o host e garante que não aponta para IP privado/loopback.
+  await assertPublicDbHost(payload.host);
 
   const driver = findDriver(payload.provider);
   if (!driver) {
@@ -50,6 +55,13 @@ export async function GET() {
 export async function POST(req: NextRequest) {
   try {
     const ownerId = await requireCurrentUserId();
+    const rl = rateLimit("connections", ownerId);
+    if (!rl.allowed) {
+      return NextResponse.json(
+        { error: "Muitas tentativas de criar conexão. Aguarde alguns instantes." },
+        { status: 429, headers: rl.retryAfterMs ? { "Retry-After": String(Math.ceil(rl.retryAfterMs / 1000)) } : undefined }
+      );
+    }
     const body = await req.json();
     const parsed = connectionPayloadSchema.safeParse(body);
 
@@ -144,7 +156,8 @@ export async function POST(req: NextRequest) {
     }
 
     if (error instanceof Error && error.message !== "UNAUTHENTICATED") {
-      return NextResponse.json({ error: error.message || "Falha ao testar conexão" }, { status: 400 });
+      // Não vazar mensagem crua do driver (pode conter host/porta/credenciais na mensagem)
+      return NextResponse.json({ error: "Falha ao testar conexão" }, { status: 400 });
     }
 
     return errorResponse(error, "Falha ao criar conexão");
