@@ -102,6 +102,8 @@ model MigrationPackage {
   sourceProvider String
   fileCount      Int
   checksum       String
+  /// Versão do parser que gerou os snapshots. Diferente da atual = pacote desatualizado.
+  parserVersion  Int              @default(0)
   createdAt      DateTime         @default(now())
   files          MigrationFile[]
   snapshots      MigrationSnapshotRow[]
@@ -131,6 +133,8 @@ model MigrationSnapshotRow {
   migrationName  String
   diagramJson    String
   warningsJson   String
+  /// Resumo do delta desta migration (MigrationSnapshotStats serializado) — alimenta a timeline.
+  statsJson      String           @default("{}")
   createdAt      DateTime         @default(now())
 
   @@index([packageId, migrationOrder])

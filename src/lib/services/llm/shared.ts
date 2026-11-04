@@ -43,6 +43,19 @@ export type LlmModelInfo = {
   description?: string;
 };
 
+/** Entrada de uma geração de texto livre (sem o formato JSON de operações de schema). */
+export type LlmTextInput = {
+  model: string;
+  systemInstruction: string;
+  prompt: string;
+};
+
+export type LlmTextResult = {
+  text: string;
+  /** true quando o modelo parou por limite de tokens (resposta possivelmente cortada). */
+  truncated: boolean;
+};
+
 export type LlmTurnInput = {
   currentDiagram: DiagramResponse;
   history: Array<{ role: "user" | "assistant"; message: string }>;

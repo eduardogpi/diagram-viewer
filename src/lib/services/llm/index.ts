@@ -1,20 +1,30 @@
 import { logger } from "@/lib/logger";
+import { HttpError } from "@/lib/errors";
 import {
+  generateTextWithGemini,
   listGeminiModels,
   streamSchemaOpsWithGemini,
 } from "@/lib/services/llm/gemini";
 import {
+  generateTextWithNvidia,
   listNvidiaModels,
   streamSchemaOpsWithNvidia,
 } from "@/lib/services/llm/nvidia";
 import {
+  generateTextWithOpenRouter,
   listOpenRouterModels,
   streamSchemaOpsWithOpenRouter,
 } from "@/lib/services/llm/openrouter";
-import type { LlmModelInfo, LlmStreamCallback, LlmTurnInput } from "@/lib/services/llm/shared";
+import type {
+  LlmModelInfo,
+  LlmStreamCallback,
+  LlmTextInput,
+  LlmTextResult,
+  LlmTurnInput,
+} from "@/lib/services/llm/shared";
 import type { SchemaOpsResponse } from "@/lib/services/schema-ops";
 
-export type { LlmModelInfo, LlmStreamCallback, LlmTurnInput };
+export type { LlmModelInfo, LlmStreamCallback, LlmTextInput, LlmTextResult, LlmTurnInput };
 
 export const LLM_PROVIDERS = ["gemini", "openrouter", "nvidia"] as const;
 export type LlmProvider = (typeof LLM_PROVIDERS)[number];
@@ -72,6 +82,47 @@ export async function streamSchemaOps(
     default:
       throw new Error(`Provedor de LLM "${provider}" ainda não suportado`);
   }
+}
+
+/** Geração de texto livre (sem o formato JSON de operações) — resumos, explicações, etc. */
+export async function generateText(provider: LlmProvider, input: LlmTextInput): Promise<LlmTextResult> {
+  switch (provider) {
+    case "gemini":
+      return generateTextWithGemini(input);
+    case "openrouter":
+      return generateTextWithOpenRouter(input);
+    case "nvidia":
+      return generateTextWithNvidia(input);
+    default:
+      throw new Error(`Provedor de LLM "${provider}" ainda não suportado`);
+  }
+}
+
+/**
+ * Resolve o par provedor/modelo para uma geração avulsa. Se o provedor não vier (ou não estiver
+ * configurado), cai no provedor padrão do ambiente; se o modelo não vier, usa o primeiro modelo
+ * disponível daquele provedor.
+ */
+export async function resolveLlmTarget(
+  provider?: string,
+  model?: string
+): Promise<{ provider: LlmProvider; model: string }> {
+  const resolvedProvider =
+    provider && isLlmProvider(provider) && isProviderConfigured(provider) ? provider : currentLlmProvider();
+
+  if (model) {
+    return { provider: resolvedProvider, model };
+  }
+
+  const models = await listLlmModels();
+  const match = models.find((m) => m.provider === resolvedProvider);
+  if (!match) {
+    throw new HttpError(
+      400,
+      "Nenhum modelo disponível. Configure uma chave de API (GEMINI_API_KEY, OPENROUTER_API_KEY ou NVIDIA_API_KEY) e tente de novo."
+    );
+  }
+  return { provider: resolvedProvider, model: match.id };
 }
 
 export type LlmModelInfoWithProvider = LlmModelInfo & { provider: LlmProvider };

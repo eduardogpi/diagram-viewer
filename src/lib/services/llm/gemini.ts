@@ -13,6 +13,8 @@ import {
   parseTruncatedJson,
   type LlmModelInfo,
   type LlmStreamCallback,
+  type LlmTextInput,
+  type LlmTextResult,
   type LlmTurnInput,
 } from "@/lib/services/llm/shared";
 
@@ -228,4 +230,54 @@ export async function streamSchemaOpsWithGemini(
     .join("\n");
 
   return { reply, operations: validated.operations };
+}
+
+/**
+ * Geração de texto livre (sem JSON): usada para resumos/explicações, onde o formato
+ * de operações de schema só atrapalharia.
+ */
+export async function generateTextWithGemini(input: LlmTextInput): Promise<LlmTextResult> {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) {
+    throw new Error("GEMINI_API_KEY não configurada");
+  }
+
+  const genAI = new GoogleGenerativeAI(apiKey);
+  const model = genAI.getGenerativeModel({
+    model: input.model || DEFAULT_GEMINI_MODEL,
+    systemInstruction: input.systemInstruction,
+    generationConfig: { maxOutputTokens: maxOutputTokens() },
+  });
+
+  let result;
+  try {
+    result = await model.generateContent(input.prompt);
+  } catch (err) {
+    if (err instanceof GoogleGenerativeAIFetchError) {
+      if (err.status === 429) {
+        throw new HttpError(429, "Quota da API do Gemini excedida para este modelo. Tente outro modelo ou aguarde e tente de novo.");
+      }
+      if (err.status === 404) {
+        throw new HttpError(400, `O modelo "${input.model}" não está disponível para esta chave de API. Escolha outro modelo.`);
+      }
+      if (err.status === 403) {
+        throw new HttpError(403, "A chave GEMINI_API_KEY não tem permissão para usar este modelo.");
+      }
+      throw new HttpError(502, `Falha ao chamar a API do Gemini (${err.status ?? "erro desconhecido"}).`);
+    }
+    throw err;
+  }
+
+  const response = result.response;
+  const finishReason = response.candidates?.[0]?.finishReason;
+  if (finishReason === "SAFETY" || finishReason === "RECITATION") {
+    throw new HttpError(502, "A resposta foi bloqueada pelos filtros de segurança do modelo. Tente reformular.");
+  }
+
+  const text = response.text()?.trim();
+  if (!text) {
+    throw new HttpError(502, "O modelo não retornou texto.");
+  }
+
+  return { text, truncated: finishReason === "MAX_TOKENS" };
 }

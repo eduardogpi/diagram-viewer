@@ -1,8 +1,15 @@
 import {
+  generateTextOpenAiCompatible,
   listOpenAiCompatibleModels,
   streamOpenAiCompatible,
 } from "@/lib/services/llm/openai-compatible";
-import type { LlmModelInfo, LlmStreamCallback, LlmTurnInput } from "@/lib/services/llm/shared";
+import type {
+  LlmModelInfo,
+  LlmStreamCallback,
+  LlmTextInput,
+  LlmTextResult,
+  LlmTurnInput,
+} from "@/lib/services/llm/shared";
 import type { SchemaOpsResponse } from "@/lib/services/schema-ops";
 
 const BASE_URL = "https://integrate.api.nvidia.com/v1";
@@ -41,4 +48,14 @@ export async function streamSchemaOpsWithNvidia(
     },
     onReplyDelta
   );
+}
+
+/** Geração de texto livre (resumos/explicações) via NVIDIA NIM. */
+export async function generateTextWithNvidia(input: LlmTextInput): Promise<LlmTextResult> {
+  return generateTextOpenAiCompatible({
+    ...input,
+    baseUrl: BASE_URL,
+    apiKey: getApiKey(),
+    timeoutMs: TIMEOUT_MS,
+  });
 }

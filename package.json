@@ -38,7 +38,9 @@
     "pino-pretty": "^11.2.2",
     "react": "19.2.3",
     "react-dom": "19.2.3",
+    "react-markdown": "^10.1.0",
     "reactflow": "^11.11.3",
+    "remark-gfm": "^4.0.1",
     "yauzl": "^3.4.0",
     "zod": "^3.23.8",
     "zustand": "^4.5.4"

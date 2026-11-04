@@ -11,6 +11,8 @@ import {
   parseTruncatedJson,
   type LlmModelInfo,
   type LlmStreamCallback,
+  type LlmTextInput,
+  type LlmTextResult,
   type LlmTurnInput,
 } from "@/lib/services/llm/shared";
 
@@ -238,4 +240,78 @@ export async function streamOpenAiCompatible(
     .join("\n");
 
   return { reply, operations: validated.operations };
+}
+
+/**
+ * Geração de texto livre (sem response_format JSON): usada para resumos/explicações.
+ * Não usa streaming — o consumidor recebe a resposta inteira de uma vez.
+ */
+export async function generateTextOpenAiCompatible(
+  input: LlmTextInput & {
+    baseUrl: string;
+    apiKey: string;
+    extraHeaders?: Record<string, string>;
+    timeoutMs?: number;
+  }
+): Promise<LlmTextResult> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), input.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+
+  let res: Response;
+  try {
+    res = await fetch(`${input.baseUrl}/chat/completions`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        Authorization: `Bearer ${input.apiKey}`,
+        ...input.extraHeaders,
+      },
+      body: JSON.stringify({
+        model: input.model,
+        messages: [
+          { role: "system", content: input.systemInstruction },
+          { role: "user", content: input.prompt },
+        ],
+        max_tokens: maxOutputTokens(),
+        stream: false,
+      }),
+      signal: controller.signal,
+    });
+  } catch (err) {
+    if (err instanceof Error && err.name === "AbortError") {
+      throw new HttpError(
+        504,
+        "Tempo limite excedido esperando resposta do modelo (modelos gratuitos podem demorar bem mais — tente de novo ou troque de modelo)."
+      );
+    }
+    throw new HttpError(502, "Falha de rede ao chamar a API do modelo.");
+  } finally {
+    clearTimeout(timeout);
+  }
+
+  if (!res.ok) {
+    const bodyText = await res.text().catch(() => "");
+    logger.error({ status: res.status, body: bodyText }, "falha na geração de texto");
+    if (res.status === 429) {
+      throw new HttpError(429, "Quota ou rate limit excedido para este modelo. Tente outro modelo ou aguarde.");
+    }
+    if (res.status === 404) {
+      throw new HttpError(400, "Modelo não encontrado ou indisponível para esta chave de API.");
+    }
+    if (res.status === 401 || res.status === 403) {
+      throw new HttpError(res.status, "Chave de API inválida ou sem permissão para este modelo.");
+    }
+    throw new HttpError(502, `Falha ao chamar o modelo (${res.status}).`);
+  }
+
+  const data = (await res.json()) as {
+    choices?: Array<{ message?: { content?: string }; finish_reason?: string }>;
+  };
+  const choice = data.choices?.[0];
+  const content = choice?.message?.content?.trim();
+  if (!content) {
+    throw new HttpError(502, `O modelo não retornou texto (finish_reason: ${choice?.finish_reason ?? "desconhecido"}).`);
+  }
+
+  return { text: content, truncated: choice?.finish_reason === "length" };
 }

@@ -1,6 +1,7 @@
 import AiModelingWorkbench from "@/components/ai-modeling/AiModelingWorkbench";
 import DiagramScopeView from "@/components/diagrams/DiagramScopeView";
 import ExplorerWorkbench from "@/components/explorer/ExplorerWorkbench";
+import MigrationTimelineView from "@/components/migrations/MigrationTimelineView";
 import MigrationsWorkbench from "@/components/migrations/MigrationsWorkbench";
 import SqlEditorWorkbench from "@/components/sql/SqlEditorWorkbench";
 import WorkspaceTabs from "@/components/workspace/WorkspaceTabs";
@@ -16,6 +17,7 @@ const tabs = [
   { id: "explorer", label: "Explorer", description: "Navegacao de schema, tabelas e relacionamentos." },
   { id: "diagram", label: "Diagramas", description: "Visao relacional e filtros por escopo." },
   { id: "migrations", label: "Migrations", description: "Importar migrations e gerar diagramas do schema." },
+  { id: "timeline", label: "Timeline", description: "Evolução das migrations em tela cheia e resumos por IA." },
   { id: "ai-modeling", label: "Modelagem IA", description: "Desenhe e altere o schema conversando com uma LLM." },
   { id: "admin", label: "Admin", description: "Auditoria, jobs e saude operacional." },
 ];
@@ -58,6 +60,20 @@ export default async function WorkspacePage({ params, searchParams }: WorkspaceP
           tabs={tabs}
         />
         <DiagramScopeView connectionId={connectionId} />
+      </div>
+    );
+  }
+
+  if (activeTab === "timeline") {
+    return (
+      <div className="space-y-6">
+        <WorkspaceTabs
+          connectionId={connectionId}
+          activeTab={activeTab}
+          favoriteTab={preference.favoriteTabs[0] ?? null}
+          tabs={tabs}
+        />
+        <MigrationTimelineView connectionId={connectionId} />
       </div>
     );
   }

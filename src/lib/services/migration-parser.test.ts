@@ -191,13 +191,13 @@ describe("migration-parser / tolerância", () => {
         name: "V1__weird.sql",
         content: `
 CREATE TABLE foo (id INT NOT NULL PRIMARY KEY);
-CREATE TRIGGER trg_foo AFTER INSERT ON foo FOR EACH ROW BEGIN INSERT INTO log VALUES (1); END;
+ALTER TABLE foo FROBNICATE id;
 `,
       },
     ]);
     expect(result.snapshots).toHaveLength(1);
     expect(result.warnings.length).toBeGreaterThan(0);
-    expect(result.warnings.some((w) => w.reason.includes("não suportado"))).toBe(true);
+    expect(result.warnings[0].statement).toContain("FROBNICATE");
     expect(result.finalDiagram.nodes.map((n) => n.id)).toContain("foo");
   });
 
@@ -385,3 +385,306 @@ describe("migration-parser / múltiplos projetos no mesmo pacote", () => {
     expect(new Set(finalDiagram.nodes.map((n) => n.id)).size).toBe(2);
   });
 });
+
+describe("migration-parser / DDL Oracle e multi-linha", () => {
+  it("aplica ALTER TABLE multi-linha (ADD em bloco e FK quebrada em várias linhas)", () => {
+    const result = parseMigrations([
+      {
+        name: "V1__init.sql",
+        content:
+          "CREATE TABLE pais (id NUMBER(19,0) NOT NULL PRIMARY KEY);\nCREATE TABLE filho (id NUMBER(19,0) NOT NULL PRIMARY KEY);",
+      },
+      {
+        name: "V2__add.sql",
+        content: `ALTER TABLE filho ADD (
+  pais_id NUMBER(19, 0),
+  nome VARCHAR2(30) DEFAULT 'x' NOT NULL
+);
+ALTER TABLE filho
+  ADD CONSTRAINT FK_FILHO_PAIS FOREIGN KEY (pais_id)
+  REFERENCES pais (ID);`,
+      },
+    ]);
+
+    const filho = result.finalDiagram.nodes.find((n) => n.id === "filho")!;
+    expect(filho.columns.map((c) => c.name)).toEqual(expect.arrayContaining(["pais_id", "nome"]));
+    const nome = filho.columns.find((c) => c.name === "nome")!;
+    expect(nome.type).toBe("VARCHAR2(30)");
+    expect(nome.isNullable).toBe(false);
+    expect(result.finalDiagram.edges.find((e) => e.constraint === "FK_FILHO_PAIS")?.target).toBe("pais");
+    expect(result.warnings).toHaveLength(0);
+  });
+
+  it("não cria coluna fantasma a partir de ADD CONSTRAINT ... UNIQUE/CHECK", () => {
+    const result = parseMigrations([
+      { name: "V1.sql", content: "CREATE TABLE t (id INT NOT NULL PRIMARY KEY, cpf VARCHAR(11));" },
+      {
+        name: "V2.sql",
+        content: "ALTER TABLE t ADD CONSTRAINT UK_T_CPF UNIQUE (cpf);\nALTER TABLE t ADD CONSTRAINT CK_T CHECK (cpf <> '');",
+      },
+    ]);
+    const t = result.finalDiagram.nodes.find((n) => n.id === "t")!;
+    expect(t.columns.map((c) => c.name)).toEqual(["id", "cpf"]);
+    expect(t.columns.some((c) => c.name.toUpperCase() === "CONSTRAINT")).toBe(false);
+  });
+
+  it("MODIFY ... NULL não corrompe o tipo da coluna", () => {
+    const result = parseMigrations([
+      {
+        name: "V1.sql",
+        content: "CREATE TABLE aluno (id INT NOT NULL PRIMARY KEY, cpf VARCHAR2(11) NOT NULL);",
+      },
+      { name: "V2.sql", content: "ALTER TABLE aluno MODIFY cpf NULL;" },
+    ]);
+    const cpf = result.finalDiagram.nodes
+      .find((n) => n.id === "aluno")!
+      .columns.find((c) => c.name === "cpf")!;
+    expect(cpf.type).toBe("VARCHAR2(11)");
+    expect(cpf.isNullable).toBe(true);
+  });
+
+  it("silencia DML, sequences, triggers e blocos PL/SQL (não viram warning)", () => {
+    const result = parseMigrations([
+      {
+        name: "V1.sql",
+        content: `CREATE TABLE log_t (id INT NOT NULL PRIMARY KEY);
+CREATE SEQUENCE log_sq START WITH 1 INCREMENT BY 1 NOMAXVALUE NOCACHE ORDER;
+INSERT INTO log_t (id) VALUES (1);
+UPDATE log_t SET id = 2;
+CREATE OR REPLACE TRIGGER log_tg BEFORE INSERT ON log_t FOR EACH ROW BEGIN :NEW.id := 1; END;
+/
+COMMIT;`,
+      },
+    ]);
+    expect(result.finalDiagram.nodes.map((n) => n.id)).toContain("log_t");
+    expect(result.warnings).toHaveLength(0);
+    expect(result.snapshots[0].stats.ignoredStatements).toBeGreaterThan(0);
+  });
+});
+
+describe("migration-parser / DDL Oracle exportado (aspas + schema)", () => {
+  const exportCompleto = `-- Gerado por DBMS_METADATA
+CREATE TABLE "NEXO"."ALUNOS"
+   (	"ID" NUMBER(19,0) NOT NULL ENABLE,
+	"NOME" VARCHAR2(150) NOT NULL ENABLE,
+	"DATA NASCIMENTO" DATE,
+	 CONSTRAINT "PK_NEXO_ALUNOS" PRIMARY KEY ("ID")
+  USING INDEX PCTFREE 10 INITRANS 2 MAXTRANS 255 COMPUTE STATISTICS
+  TABLESPACE "NEXO_DATA"  ENABLE
+   ) SEGMENT CREATION IMMEDIATE
+  PCTFREE 10 PCTUSED 40 INITRANS 1 MAXTRANS 255
+ NOCOMPRESS LOGGING
+  TABLESPACE "NEXO_DATA" ;
+
+CREATE TABLE "NEXO"."TURMAS"
+   (	"ID" NUMBER(19,0) NOT NULL ENABLE,
+	"ALUNO_ID" NUMBER(19,0),
+	 CONSTRAINT "PK_NEXO_TURMAS" PRIMARY KEY ("ID")
+   ) SEGMENT CREATION IMMEDIATE
+  PCTFREE 10 TABLESPACE "NEXO_DATA" ;
+
+ALTER TABLE "NEXO"."TURMAS" ADD CONSTRAINT "FK_TURMA_ALUNO" FOREIGN KEY ("ALUNO_ID")
+	  REFERENCES "NEXO"."ALUNOS" ("ID") ENABLE;
+/
+`;
+
+  it("reconhece CREATE TABLE com nome qualificado e entre aspas", () => {
+    const result = parseMigrations([{ name: "V1__x.sql", content: exportCompleto }]);
+    expect(result.warnings).toHaveLength(0);
+
+    const ids = result.finalDiagram.nodes.map((n) => n.id);
+    expect(ids).toEqual(expect.arrayContaining(["ALUNOS", "TURMAS"]));
+
+    const alunos = result.finalDiagram.nodes.find((n) => n.id === "ALUNOS")!;
+    expect(alunos.schema).toBe("NEXO");
+    expect(alunos.columns.map((c) => c.name)).toEqual(
+      expect.arrayContaining(["ID", "NOME", "DATA NASCIMENTO"])
+    );
+    expect(alunos.columns.find((c) => c.name === "NOME")?.isNullable).toBe(false);
+    // Coluna com espaço no nome entre aspas não pode quebrar o parser.
+    expect(alunos.columns.find((c) => c.name === "DATA NASCIMENTO")?.type).toBe("DATE");
+  });
+
+  it("reconhece FK declarada em ALTER TABLE com schema entre aspas", () => {
+    const result = parseMigrations([{ name: "V1__x.sql", content: exportCompleto }]);
+    const fk = result.finalDiagram.edges.find((e) => e.constraint === "FK_TURMA_ALUNO");
+    expect(fk).toBeDefined();
+    expect(fk?.source).toBe("TURMAS");
+    expect(fk?.target).toBe("ALUNOS");
+  });
+
+  it("aceita schema sem aspas com tabela entre aspas e vice-versa", () => {
+    const variantes = [
+      `CREATE TABLE NEXO."ALUNOS" ( ID NUMBER(19,0) NOT NULL );`,
+      `CREATE TABLE "NEXO".ALUNOS ( ID NUMBER(19,0) NOT NULL );`,
+      `CREATE TABLE "NEXO"."ALUNOS" ( ID NUMBER(19,0) NOT NULL );`,
+    ];
+    for (const content of variantes) {
+      const result = parseMigrations([{ name: "V1__x.sql", content }]);
+      expect(result.warnings).toHaveLength(0);
+      expect(result.finalDiagram.nodes.map((n) => n.id)).toContain("ALUNOS");
+    }
+  });
+
+  it("reconhece DROP/ALTER/RENAME em tabela qualificada e com aspas", () => {
+    const result = parseMigrations([
+      { name: "V1__x.sql", content: `CREATE TABLE "NEXO"."ALUNOS" ( "ID" NUMBER(19,0) NOT NULL, "CPF" VARCHAR2(11) );` },
+      { name: "V2__x.sql", content: `ALTER TABLE "NEXO"."ALUNOS" ADD "EMAIL" VARCHAR2(120);` },
+      { name: "V3__x.sql", content: `ALTER TABLE "NEXO"."ALUNOS" RENAME COLUMN "CPF" TO "DOCUMENTO";` },
+      { name: "V4__x.sql", content: `RENAME TABLE "NEXO"."ALUNOS" TO "NEXO"."DISCENTES";` },
+      { name: "V5__x.sql", content: `DROP TABLE "NEXO"."DISCENTES";` },
+    ]);
+    expect(result.warnings).toHaveLength(0);
+
+    const snap2 = result.snapshots[1].diagram.nodes.find((n) => n.id === "ALUNOS")!;
+    expect(snap2.columns.map((c) => c.name)).toContain("EMAIL");
+
+    const snap3 = result.snapshots[2].diagram.nodes.find((n) => n.id === "ALUNOS")!;
+    expect(snap3.columns.map((c) => c.name)).toEqual(expect.arrayContaining(["DOCUMENTO"]));
+    expect(snap3.columns.map((c) => c.name)).not.toContain("CPF");
+
+    expect(result.snapshots[3].diagram.nodes.map((n) => n.id)).toEqual(["DISCENTES"]);
+    expect(result.snapshots[4].diagram.nodes).toHaveLength(0);
+  });
+});
+
+describe("migration-parser / estatísticas por snapshot", () => {
+  it("calcula delta de tabelas, colunas e FKs por snapshot", () => {
+    const result = parseMigrations([
+      {
+        name: "V1.sql",
+        content:
+          "CREATE TABLE a (id INT NOT NULL PRIMARY KEY);\nCREATE TABLE b (id INT NOT NULL PRIMARY KEY, a_id INT REFERENCES a(id));",
+      },
+      { name: "V2.sql", content: "ALTER TABLE a ADD COLUMN nome VARCHAR(10);\nCREATE TABLE c (id INT NOT NULL PRIMARY KEY);" },
+      { name: "V3.sql", content: "DROP TABLE b;" },
+    ]);
+
+    const [s1, s2, s3] = result.snapshots;
+    expect(s1.stats.tables).toBe(2);
+    expect(s1.stats.columns).toBe(3);
+    expect(s1.stats.edges).toBe(1);
+    expect([...s1.stats.addedTables].sort()).toEqual(["a", "b"]);
+
+    expect(s2.stats.tables).toBe(3);
+    expect(s2.stats.addedTables).toEqual(["c"]);
+    expect(s2.stats.alteredTables).toEqual(["a"]);
+
+    expect(s3.stats.tables).toBe(2);
+    expect(s3.stats.removedTables).toEqual(["b"]);
+  });
+});
+
+describe("migration-parser / qualidade Flyway-Oracle", () => {
+  const parse = (content: string) => parseMigrations([{ name: "V1__x.sql", content }]);
+
+  it("não gera warning para corpo de trigger PL/SQL com IF/END IF aninhados", () => {
+    const result = parse(`
+CREATE TABLE t (id NUMBER NOT NULL, criado TIMESTAMP);
+CREATE OR REPLACE TRIGGER trg_t BEFORE INSERT ON t FOR EACH ROW
+BEGIN
+  IF :NEW.criado IS NULL THEN
+    :NEW.criado := SYSTIMESTAMP;
+  END IF;
+  IF :NEW.id IS NULL THEN :NEW.id := 1; END IF;
+END;
+/
+CREATE TABLE depois (id NUMBER);
+`);
+    expect(result.warnings).toEqual([]);
+    expect(result.finalDiagram.nodes.map((n) => n.id).sort()).toEqual(["depois", "t"]);
+  });
+
+  it("trigger sem '/' ainda termina no END; e não engole o statement seguinte", () => {
+    const result = parse(`
+CREATE TRIGGER trg AFTER INSERT ON t FOR EACH ROW BEGIN INSERT INTO log VALUES (1); END;
+CREATE TABLE seguinte (id INT);
+`);
+    expect(result.warnings).toEqual([]);
+    expect(result.finalDiagram.nodes.map((n) => n.id)).toEqual(["seguinte"]);
+  });
+
+  it("protege ';' dentro de corpo $$ ... $$ (Postgres)", () => {
+    const result = parse(`
+CREATE FUNCTION f() RETURNS trigger AS $$ BEGIN NEW.x := 1; RETURN NEW; END; $$ LANGUAGE plpgsql;
+CREATE TABLE a (id INT);
+`);
+    expect(result.warnings).toEqual([]);
+    expect(result.finalDiagram.nodes.map((n) => n.id)).toEqual(["a"]);
+  });
+
+  it("CREATE TABLE AS SELECT * copia as colunas da origem (sem PK/FK)", () => {
+    const result = parse(`
+CREATE TABLE origem (id NUMBER NOT NULL PRIMARY KEY, nome VARCHAR2(50));
+CREATE TABLE origem_bkp_20250101 AS SELECT * FROM origem;
+`);
+    expect(result.warnings).toEqual([]);
+    const bkp = result.finalDiagram.nodes.find((n) => n.id === "origem_bkp_20250101");
+    expect(bkp?.columns.map((c) => c.name)).toEqual(["id", "nome"]);
+    expect(bkp?.columns.some((c) => c.isPrimary)).toBe(false);
+  });
+
+  it("ALTER TABLE ... DROP ( a, b ) remove várias colunas (Oracle)", () => {
+    const result = parse(`
+CREATE TABLE t (id INT, a INT, b INT, c INT);
+ALTER TABLE t DROP ( a, b );
+`);
+    expect(result.warnings).toEqual([]);
+    expect(result.finalDiagram.nodes[0].columns.map((c) => c.name)).toEqual(["id", "c"]);
+  });
+
+  it("MODIFY ( ... ) em bloco atualiza tipo e nulidade de cada coluna", () => {
+    const result = parse(`
+CREATE TABLE t (a VARCHAR2(10), b NUMBER);
+ALTER TABLE t MODIFY ( a VARCHAR2(100) NOT NULL, b NUMBER(10,2) );
+`);
+    const [a, b] = result.finalDiagram.nodes[0].columns;
+    expect(a).toMatchObject({ type: "VARCHAR2(100)", isNullable: false });
+    expect(b.type).toBe("NUMBER(10,2)");
+  });
+
+  it("reconhece PRIMARY KEY nomeada (CREATE e ALTER ADD CONSTRAINT)", () => {
+    const result = parse(`
+CREATE TABLE a (id INT NOT NULL, CONSTRAINT pk_a PRIMARY KEY (id));
+CREATE TABLE b (x INT NOT NULL, y INT NOT NULL);
+ALTER TABLE b ADD CONSTRAINT pk_b PRIMARY KEY (x, y);
+`);
+    const pk = (id: string) =>
+      result.finalDiagram.nodes.find((n) => n.id === id)!.columns.filter((c) => c.isPrimary).map((c) => c.name);
+    expect(pk("a")).toEqual(["id"]);
+    expect(pk("b")).toEqual(["x", "y"]);
+  });
+
+  it("ADD ( CONSTRAINT fk ... ) em bloco não cria coluna chamada CONSTRAINT", () => {
+    const result = parse(`
+CREATE TABLE pai (id INT PRIMARY KEY);
+CREATE TABLE filho (id INT, pai_id INT);
+ALTER TABLE filho ADD ( CONSTRAINT fk_f FOREIGN KEY (pai_id) REFERENCES pai (id) );
+`);
+    const filho = result.finalDiagram.nodes.find((n) => n.id === "filho")!;
+    expect(filho.columns.map((c) => c.name)).toEqual(["id", "pai_id"]);
+    expect(result.finalDiagram.edges).toHaveLength(1);
+  });
+
+  it("cláusulas depois do corpo do CREATE TABLE não viram colunas", () => {
+    const result = parse(`
+CREATE TABLE t (id INT, nome VARCHAR(10)) TABLESPACE users STORAGE (INITIAL 64K);
+`);
+    expect(result.warnings).toEqual([]);
+    expect(result.finalDiagram.nodes[0].columns.map((c) => c.name)).toEqual(["id", "nome"]);
+  });
+
+  it("ordena versões Flyway com 4+ partes numericamente", () => {
+    const result = parseMigrations([
+      { name: "V1.2.10.1__b.sql", content: "CREATE TABLE b (id INT);" },
+      { name: "V1.2.9.5__a.sql", content: "CREATE TABLE a (id INT);" },
+      { name: "V1.2.10.0__c.sql", content: "CREATE TABLE c (id INT);" },
+    ]);
+    expect(result.snapshots.map((s) => s.migrationName)).toEqual([
+      "V1.2.9.5__a.sql",
+      "V1.2.10.0__c.sql",
+      "V1.2.10.1__b.sql",
+    ]);
+  });
+});
+

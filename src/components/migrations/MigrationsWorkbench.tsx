@@ -1,9 +1,13 @@
 "use client";
 
+import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import MigrationDiagram, { type DiffStatus, type MigrationDiagramPayload } from "@/components/migrations/MigrationDiagram";
+import MigrationSummaryPanel from "@/components/migrations/MigrationSummaryPanel";
+import MigrationTableList from "@/components/migrations/MigrationTableList";
 import MigrationTimeline from "@/components/migrations/MigrationTimeline";
+import { computeDiagramDiff } from "@/lib/diagram-diff";
 import type { DiagramResponse } from "@/lib/types/diagram";
 import type {
   MigrationAppendResultDTO,
@@ -33,6 +37,8 @@ export default function MigrationsWorkbench({ connectionId }: Props) {
   const [currentSnapshot, setCurrentSnapshot] = useState<MigrationSnapshotDTO | null>(null);
   const [loadingSnapshot, setLoadingSnapshot] = useState(false);
   const [diffEnabled, setDiffEnabled] = useState(true);
+  /** Tabela selecionada no canvas — destaca na timeline onde ela nasceu/mudou. */
+  const [selectedTableId, setSelectedTableId] = useState<string | null>(null);
 
   const [uploadName, setUploadName] = useState("");
   const [uploadFiles, setUploadFiles] = useState<File[]>([]);
@@ -46,6 +52,9 @@ export default function MigrationsWorkbench({ connectionId }: Props) {
   const [appendError, setAppendError] = useState<string | null>(null);
   const [appendResult, setAppendResult] = useState<MigrationAppendResultDTO | null>(null);
   const appendFileInputRef = useRef<HTMLInputElement>(null);
+
+  const [reprocessing, setReprocessing] = useState(false);
+  const [reprocessError, setReprocessError] = useState<string | null>(null);
 
   const refreshList = useCallback(async () => {
     setLoadingList(true);
@@ -140,7 +149,7 @@ export default function MigrationsWorkbench({ connectionId }: Props) {
   }, [connectionId, selectedPackageId, currentOrder]);
 
   // Diff real: carrega snapshot anterior quando diff está ligado
-  const [previousDiagram, setPreviousDiagram] = useState<MigrationDiagramPayload | null>(null);
+  const [previousDiagram, setPreviousDiagram] = useState<DiagramResponse | null>(null);
   useEffect(() => {
     if (!selectedPackageId || !diffEnabled || !currentSnapshot || currentSnapshot.migrationOrder <= 1) {
       setPreviousDiagram(null);
@@ -163,25 +172,7 @@ export default function MigrationsWorkbench({ connectionId }: Props) {
 
   const computedDiffMap = useMemo<Map<string, DiffStatus>>(() => {
     if (!diffEnabled || !currentSnapshot || !previousDiagram) return new Map();
-    const map = new Map<string, DiffStatus>();
-    const prevNodeIds = new Set(previousDiagram.nodes.map((n) => n.id));
-    const prevNodeSignatures = new Map<string, string>();
-    previousDiagram.nodes.forEach((n) => {
-      prevNodeSignatures.set(n.id, signatureOf(n));
-    });
-    currentSnapshot.diagram.nodes.forEach((n) => {
-      if (!prevNodeIds.has(n.id)) {
-        map.set(n.id, "added");
-      } else if (prevNodeSignatures.get(n.id) !== signatureOf(n)) {
-        map.set(n.id, "altered");
-      }
-    });
-    prevNodeIds.forEach((id) => {
-      if (!currentSnapshot.diagram.nodes.some((n) => n.id === id)) {
-        map.set(id, "removed");
-      }
-    });
-    return map;
+    return computeDiagramDiff(previousDiagram, currentSnapshot.diagram) as Map<string, DiffStatus>;
   }, [diffEnabled, currentSnapshot, previousDiagram]);
 
   const handleFiles = useCallback((files: FileList | File[]) => {
@@ -258,6 +249,29 @@ export default function MigrationsWorkbench({ connectionId }: Props) {
     }
   }, [appendFiles, connectionId, selectedPackageId, loadDetail, refreshList]);
 
+  /** Regenera todos os snapshots do pacote com o parser atual (snapshots são persistidos). */
+  const reprocessPackage = useCallback(async () => {
+    if (!selectedPackageId) return;
+    const keepOrder = currentOrder;
+    setReprocessing(true);
+    setReprocessError(null);
+    try {
+      const res = await fetch(`/api/migrations/${connectionId}/${selectedPackageId}/reprocess`, { method: "POST" });
+      if (!res.ok) {
+        const body = (await res.json().catch(() => null)) as { error?: string } | null;
+        throw new Error(body?.error ?? "Falha ao reprocessar o package");
+      }
+      await loadDetail(selectedPackageId);
+      // loadDetail volta para o último snapshot; preserva onde o usuário estava.
+      if (keepOrder !== null) setCurrentOrder(keepOrder);
+      await refreshList();
+    } catch (err) {
+      setReprocessError(err instanceof Error ? err.message : "Erro ao reprocessar");
+    } finally {
+      setReprocessing(false);
+    }
+  }, [connectionId, selectedPackageId, currentOrder, loadDetail, refreshList]);
+
   const removePackage = useCallback(
     async (packageId: string) => {
       if (!confirm("Remover este package de migrations?")) return;
@@ -272,6 +286,11 @@ export default function MigrationsWorkbench({ connectionId }: Props) {
     },
     [connectionId, selectedPackageId, refreshList]
   );
+
+  // Ao trocar de snapshot/package, a tabela em foco deixa de fazer sentido.
+  useEffect(() => {
+    setSelectedTableId(null);
+  }, [currentOrder, selectedPackageId]);
 
   const activeDiagram: MigrationDiagramPayload | null = currentSnapshot?.diagram ?? finalDiagram;
   const activeDiffMap = currentSnapshot ? computedDiffMap : undefined;
@@ -433,16 +452,45 @@ export default function MigrationsWorkbench({ connectionId }: Props) {
                     {detail.fileCount} arquivos · {detail.snapshots.length} snapshots · checksum {detail.checksum.slice(0, 8)}
                   </p>
                 </div>
-                <label className="flex items-center gap-2 text-xs text-[var(--color-text-secondary)]">
-                  <input
-                    type="checkbox"
-                    checked={diffEnabled}
-                    onChange={(e) => setDiffEnabled(e.target.checked)}
-                    className="accent-[var(--color-accent)]"
-                  />
-                  Mostrar diff entre snapshots
-                </label>
+                <div className="flex flex-wrap items-center gap-3">
+                  <label className="flex items-center gap-2 text-xs text-[var(--color-text-secondary)]">
+                    <input
+                      type="checkbox"
+                      checked={diffEnabled}
+                      onChange={(e) => setDiffEnabled(e.target.checked)}
+                      className="accent-[var(--color-accent)]"
+                    />
+                    Mostrar diff entre snapshots
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() => void reprocessPackage()}
+                    disabled={reprocessing}
+                    title="Relê os arquivos gravados e regenera todos os snapshots com o parser atual"
+                    className="rounded-lg border border-[var(--color-border-subtle)] px-3 py-1.5 text-xs text-[var(--color-text-secondary)] transition hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {reprocessing ? "Reprocessando..." : "Reprocessar"}
+                  </button>
+                </div>
               </div>
+
+              {detail.parserStale ? (
+                <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-[color-mix(in_srgb,var(--color-warning)_45%,transparent)] bg-[color-mix(in_srgb,var(--color-warning)_12%,transparent)] p-3">
+                  <p className="text-xs text-[var(--color-warning)]">
+                    Este pacote foi processado com uma versão anterior do parser (v{detail.parserVersion}) — o
+                    diagrama e a timeline podem estar incompletos. Reprocesse para atualizar.
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => void reprocessPackage()}
+                    disabled={reprocessing}
+                    className="rounded-lg bg-[var(--color-warning)] px-3 py-1.5 text-xs font-semibold text-[var(--color-text-inverse)] transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {reprocessing ? "Reprocessando..." : "Reprocessar agora"}
+                  </button>
+                </div>
+              ) : null}
+              {reprocessError ? <p className="text-xs text-red-500">{reprocessError}</p> : null}
 
               <div className="flex flex-wrap items-center gap-3 rounded-xl border border-dashed border-[var(--color-border-subtle)] p-3">
                 <input
@@ -499,10 +547,19 @@ export default function MigrationsWorkbench({ connectionId }: Props) {
 
               {detail.snapshots.length > 0 ? (
                 <div className="space-y-3">
+                  <div className="flex justify-end">
+                    <Link
+                      href={`/workspace/${connectionId}?tab=timeline`}
+                      className="text-xs text-[var(--color-accent)] underline-offset-2 hover:underline"
+                    >
+                      Abrir timeline em tela cheia →
+                    </Link>
+                  </div>
                   <MigrationTimeline
                     snapshots={detail.snapshots}
                     currentOrder={currentOrder}
                     onSelect={setCurrentOrder}
+                    highlightTableId={selectedTableId}
                   />
                   {currentSnapshot ? (
                     <p className="text-xs text-[var(--color-text-muted)]">
@@ -533,6 +590,15 @@ export default function MigrationsWorkbench({ connectionId }: Props) {
                 </div>
               ) : null}
 
+              {currentSnapshot && selectedPackageId ? (
+                <MigrationSummaryPanel
+                  connectionId={connectionId}
+                  packageId={selectedPackageId}
+                  order={currentSnapshot.migrationOrder}
+                  migrationName={currentSnapshot.migrationName}
+                />
+              ) : null}
+
               {totalWarnings > 0 && currentSnapshot ? (
                 <details className="rounded-lg border border-[color-mix(in_srgb,var(--color-warning)_45%,transparent)] bg-[color-mix(in_srgb,var(--color-warning)_12%,transparent)] p-3">
                   <summary className="cursor-pointer text-xs text-[var(--color-warning)]">
@@ -561,25 +627,41 @@ export default function MigrationsWorkbench({ connectionId }: Props) {
                   ) : null}
                 </div>
                 {/* Altura fixa evita colapso de layout (e o salto de scroll da página) enquanto o próximo snapshot carrega. */}
-                <div className="relative">
-                  {activeDiagram ? (
-                    <MigrationDiagram diagram={activeDiagram} diffMap={activeDiffMap} height={640} />
-                  ) : (
+                {activeDiagram ? (
+                  <div className="grid gap-3 lg:grid-cols-[300px_minmax(0,1fr)]">
+                    <MigrationTableList
+                      diagram={activeDiagram}
+                      diffMap={activeDiffMap}
+                      selectedTableId={selectedTableId}
+                      onSelect={setSelectedTableId}
+                    />
+                    <div className="relative">
+                      <MigrationDiagram
+                        diagram={activeDiagram}
+                        diffMap={activeDiffMap}
+                        height={640}
+                        selectedNodeId={selectedTableId}
+                        onSelectedNodeChange={setSelectedTableId}
+                      />
+                      {loadingSnapshot || loadingDiagram ? (
+                        <div className="pointer-events-none absolute inset-0 flex items-center justify-center rounded-2xl bg-[var(--color-bg-layer-1)]/40 backdrop-blur-[1px]">
+                          <span className="rounded-full border border-[var(--color-border-subtle)] bg-[var(--color-bg-layer-1)] px-3 py-1.5 text-xs text-[var(--color-text-secondary)] shadow-[var(--shadow-floating)]">
+                            Carregando diagrama...
+                          </span>
+                        </div>
+                      ) : null}
+                    </div>
+                  </div>
+                ) : (
+                  <div className="relative">
                     <div
                       style={{ height: 640 }}
                       className="flex items-center justify-center rounded-2xl border border-dashed border-[var(--color-border-subtle)] text-sm text-[var(--color-text-muted)]"
                     >
                       {loadingSnapshot || loadingDiagram ? "Carregando diagrama..." : "Sem diagrama para exibir."}
                     </div>
-                  )}
-                  {(loadingSnapshot || loadingDiagram) && activeDiagram ? (
-                    <div className="pointer-events-none absolute inset-0 flex items-center justify-center rounded-2xl bg-[var(--color-bg-layer-1)]/40 backdrop-blur-[1px]">
-                      <span className="rounded-full border border-[var(--color-border-subtle)] bg-[var(--color-bg-layer-1)] px-3 py-1.5 text-xs text-[var(--color-text-secondary)] shadow-[var(--shadow-floating)]">
-                        Carregando diagrama...
-                      </span>
-                    </div>
-                  ) : null}
-                </div>
+                  </div>
+                )}
               </div>
 
               {diffEnabled && computedDiffMap.size > 0 ? (
@@ -632,11 +714,4 @@ function DiffColumn({
       )}
     </div>
   );
-}
-
-function signatureOf(node: { id: string; label: string; columns: Array<{ name: string; type: string; isPrimary: boolean; isForeign: boolean }> }): string {
-  return [
-    node.label,
-    node.columns.map((c) => `${c.name}:${c.type}:${c.isPrimary ? "1" : "0"}:${c.isForeign ? "1" : "0"}`).join(","),
-  ].join("|");
 }
