@@ -10,7 +10,7 @@ export type ZipExtractionOptions = {
   maxTotalSize?: number;
 };
 
-const DEFAULT_MAX_FILES = 250;
+const DEFAULT_MAX_FILES = 500;
 const DEFAULT_MAX_FILE_SIZE = 5 * 1024 * 1024;
 const DEFAULT_MAX_TOTAL_SIZE = 50 * 1024 * 1024;
 
@@ -41,7 +41,13 @@ function normalizeEntryPath(rawPath: string): string | null {
  * Lê o conteúdo de uma entrada do zip como string UTF-8.
  * Usa inflateRaw manualmente para evitar depender do método de compressão padrão.
  */
-function readEntryContent(zipfile: yauzl.ZipFile, entry: yauzl.Entry): Promise<string> {
+function readEntryContent(
+  zipfile: yauzl.ZipFile,
+  entry: yauzl.Entry,
+  normalizedPath: string,
+  maxFileSize: number,
+  onChunkBytes: (bytes: number) => void
+): Promise<string> {
   return new Promise((resolve, reject) => {
     zipfile.openReadStream(entry, (err, readStream) => {
       if (err) {
@@ -49,12 +55,35 @@ function readEntryContent(zipfile: yauzl.ZipFile, entry: yauzl.Entry): Promise<s
         return;
       }
       const chunks: Buffer[] = [];
-      readStream.on("data", (chunk: Buffer) => chunks.push(chunk));
+      let entryBytes = 0;
+      let aborted = false;
+      readStream.on("data", (chunk: Buffer) => {
+        if (aborted) return;
+        entryBytes += chunk.length;
+        if (entryBytes > maxFileSize) {
+          aborted = true;
+          readStream.destroy();
+          reject(new Error(`Arquivo "${normalizedPath}" excede ${maxFileSize} bytes`));
+          return;
+        }
+        try {
+          onChunkBytes(chunk.length);
+        } catch (limitErr) {
+          aborted = true;
+          readStream.destroy();
+          reject(limitErr);
+          return;
+        }
+        chunks.push(chunk);
+      });
       readStream.on("end", () => {
+        if (aborted) return;
         const buffer = Buffer.concat(chunks);
         resolve(buffer.toString("utf8"));
       });
-      readStream.on("error", reject);
+      readStream.on("error", (streamErr) => {
+        if (!aborted) reject(streamErr);
+      });
     });
   });
 }
@@ -104,8 +133,7 @@ export async function extractZipToMigrationInputs(
         reject(new Error(`Arquivo "${normalizedPath}" excede ${maxFileSize} bytes`));
         return;
       }
-      totalSize += entry.uncompressedSize;
-      if (totalSize > maxTotalSize) {
+      if (totalSize + entry.uncompressedSize > maxTotalSize) {
         reject(new Error(`Tamanho total do zip excede ${maxTotalSize} bytes`));
         return;
       }
@@ -115,7 +143,18 @@ export async function extractZipToMigrationInputs(
       }
 
       try {
-        const content = await readEntryContent(zipfile, entry);
+        const content = await readEntryContent(
+          zipfile,
+          entry,
+          normalizedPath,
+          maxFileSize,
+          (chunkBytes) => {
+            totalSize += chunkBytes;
+            if (totalSize > maxTotalSize) {
+              throw new Error(`Tamanho total do zip excede ${maxTotalSize} bytes`);
+            }
+          }
+        );
         const baseName = normalizedPath.slice(normalizedPath.lastIndexOf("/") + 1);
         files.push({ name: baseName, content, path: normalizedPath });
         zipfile.readEntry();

@@ -21,14 +21,15 @@ import ReactFlow, {
   type Viewport,
 } from "reactflow";
 import "reactflow/dist/style.css";
-import { Waypoints } from "lucide-react";
+import { LayoutGrid, Network, Waypoints } from "lucide-react";
+import CytoscapeDiagram from "@/components/migrations/CytoscapeDiagram";
 import { ThemeToggle } from "@/components/theme/ThemeToggle";
 
 type Props = { connectionId: string };
 type GroupingMode = "domain" | "schema" | "prefix";
 type LayoutDirection = "TB" | "LR";
-type Column = { name: string; type: string; isPrimary: boolean; isForeign: boolean };
-type TableNode = { id: string; label: string; schema: string; scope: string; columns: Column[] };
+type Column = { name: string; type: string; isPrimary: boolean; isForeign: boolean; comment?: string };
+type TableNode = { id: string; label: string; schema: string; scope: string; comment?: string; columns: Column[] };
 type Relationship = {
   id: string;
   source: string;
@@ -67,6 +68,8 @@ type NodeData = {
   label: string;
   schema: string;
   scope: string;
+  /** Comentário/documentação da tabela vindo do catálogo do banco. */
+  comment?: string;
   columns: Column[];
   /** true = tabela corresponde à busca textual ativa. */
   highlighted: boolean;
@@ -240,15 +243,28 @@ type GraphLayout = {
  * (horizontal no layout TB, vertical no LR) e ordenados pela posição do nó do outro lado —
  * evita que múltiplas linhas saiam/entrem todas do mesmo ponto e se sobreponham.
  */
+/**
+ * Altura que o comentário (exibido inteiro, quebrando linha) soma ao card: texto 12px na largura
+ * útil do card (~320px) dá ~44 caracteres por linha de 16px, mais a margem acima.
+ */
+function commentExtraHeight(comment: string): number {
+  const lines = comment
+    .split(/\r?\n/)
+    .reduce((total, paragraph) => total + Math.max(1, Math.ceil(paragraph.trim().length / 44)), 0);
+  return 6 + lines * 16;
+}
+
 function computeGraphLayout(
   nodeIds: string[],
   edges: Array<{ id: string; source: string; target: string }>,
   direction: LayoutDirection,
-  pinnedPositions: Map<string, { x: number; y: number }>
+  pinnedPositions: Map<string, { x: number; y: number }>,
+  /** Altura extra por nó (ex: comentário longo exibido inteiro no card). */
+  extraHeights?: Map<string, number>
 ): GraphLayout {
   const graph = new dagre.graphlib.Graph().setDefaultEdgeLabel(() => ({}));
   graph.setGraph({ rankdir: direction, ranksep: direction === "TB" ? 170 : 220, nodesep: 120, edgesep: 60, marginx: 48, marginy: 48 });
-  nodeIds.forEach((id) => graph.setNode(id, { width: NODE_W, height: NODE_H }));
+  nodeIds.forEach((id) => graph.setNode(id, { width: NODE_W, height: NODE_H + (extraHeights?.get(id) ?? 0) }));
   edges.forEach((edge) => {
     if (graph.hasNode(edge.source) && graph.hasNode(edge.target)) {
       graph.setEdge(edge.source, edge.target);
@@ -389,10 +405,15 @@ function TableCard({ id, data }: NodeProps<NodeData>) {
         </div>
         <h4 className="mt-2 truncate text-lg font-semibold text-[var(--color-text-primary)]">{data.label}</h4>
         <p className="mt-2 truncate font-mono text-xs text-[var(--color-text-secondary)]">{data.schema}</p>
+        {data.comment ? (
+          <p className="mt-1.5 whitespace-pre-wrap break-words text-xs italic text-[var(--color-text-secondary)]">
+            {data.comment}
+          </p>
+        ) : null}
       </div>
       <div className="space-y-2 px-5 py-4">
         {columns.map((column) => (
-          <div key={column.name} className="flex items-center justify-between gap-3 text-xs">
+          <div key={column.name} className="flex items-center justify-between gap-3 text-xs" title={column.comment}>
             <div className="flex min-w-0 items-center gap-2">
               <span className={`inline-flex h-5 min-w-[30px] items-center justify-center rounded-md border px-1.5 text-[10px] font-semibold ${
                 column.isPrimary
@@ -402,6 +423,11 @@ function TableCard({ id, data }: NodeProps<NodeData>) {
                     : "border-[var(--color-border-subtle)] bg-[var(--color-panel-muted)] text-[var(--color-text-secondary)]"
               }`}>{column.isPrimary ? "PK" : column.isForeign ? "FK" : ""}</span>
               <span className="truncate font-mono text-[12px] text-[var(--color-text-primary)]">{column.name}</span>
+              {column.comment ? (
+                <span className="shrink-0 text-[10px] text-[var(--color-text-muted)]" aria-label="Coluna documentada">
+                  ⓘ
+                </span>
+              ) : null}
             </div>
             <span className="font-mono text-[11px] text-[var(--color-text-secondary)]">{column.type}</span>
           </div>
@@ -453,6 +479,9 @@ function NodePanel({
           <p className="text-[10px] uppercase tracking-[0.26em] text-slate-500">Tabela selecionada</p>
           <h4 className="mt-2 truncate text-lg font-semibold text-white">{node.label}</h4>
           <p className="mt-1 truncate font-mono text-xs text-slate-500">{node.schema}</p>
+          {node.comment ? (
+            <p className="mt-2 whitespace-pre-wrap text-xs leading-relaxed text-slate-300">{node.comment}</p>
+          ) : null}
         </div>
         <button
           onClick={onClose}
@@ -497,6 +526,24 @@ function NodePanel({
           <p className="mt-1 font-semibold text-white">{neighborIds.size - 1}</p>
         </div>
       </div>
+
+      {node.columns.some((c) => c.comment) ? (
+        <div className="mt-4 rounded-2xl border border-white/10 bg-white/5 p-3">
+          <p className="text-xs text-slate-500">
+            Colunas documentadas ({node.columns.filter((c) => c.comment).length}/{node.columns.length})
+          </p>
+          <ul className="mt-2 max-h-48 space-y-1.5 overflow-y-auto pr-1 text-xs">
+            {node.columns
+              .filter((c) => c.comment)
+              .map((c) => (
+                <li key={c.name}>
+                  <span className="font-mono text-slate-200">{c.name}</span>
+                  <span className="text-slate-400"> — {c.comment}</span>
+                </li>
+              ))}
+          </ul>
+        </div>
+      ) : null}
     </Panel>
   );
 }
@@ -744,6 +791,7 @@ export default function DiagramScopeView({ connectionId }: Props) {
   const [pendingViewport, setPendingViewport] = useState<Viewport | null>(null);
   const [manualPositions, setManualPositions] = useState<Map<string, { x: number; y: number }>>(new Map());
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const [viewMode, setViewMode] = useState<"er" | "cytoscape">("er");
   const [preferencesLoaded, setPreferencesLoaded] = useState(false);
   const [minimap, setMinimap] = useState(DEFAULT_PREFERENCES.minimap);
   const [scopeDepth, setScopeDepth] = useState(DEFAULT_PREFERENCES.scopeDepth);
@@ -846,7 +894,18 @@ export default function DiagramScopeView({ connectionId }: Props) {
   }, [manualEdges, payload?.edges, visibleTableSet]);
 
   const graphLayout = useMemo(
-    () => computeGraphLayout(visibleTables.map((table) => table.id), connectivityEdges, layoutDirection, manualPositions),
+    () =>
+      computeGraphLayout(
+        visibleTables.map((table) => table.id),
+        connectivityEdges,
+        layoutDirection,
+        manualPositions,
+        new Map(
+          visibleTables
+            .filter((table) => table.comment?.trim())
+            .map((table) => [table.id, commentExtraHeight(table.comment!.trim())])
+        )
+      ),
     [connectivityEdges, layoutDirection, manualPositions, visibleTables]
   );
 
@@ -951,6 +1010,7 @@ export default function DiagramScopeView({ connectionId }: Props) {
             label: table.label,
             schema: table.schema,
             scope: tableGroupMap.get(table.id) ?? table.scope,
+            comment: table.comment,
             columns: table.columns,
             highlighted: highlightedTableSet.has(table.id),
             emphasized: highlighted ? involved : false,
@@ -1149,6 +1209,36 @@ export default function DiagramScopeView({ connectionId }: Props) {
 
           {/* Linha 2: controles de layout agrupados com separadores */}
           <div className="mt-3 flex flex-wrap items-center gap-2 text-[var(--color-text-primary)]">
+            {/* Grupo: modo de visualização (Cartões ER vs Grafo Cytoscape) */}
+            <div className="flex items-center overflow-hidden rounded-2xl border border-[var(--color-border-subtle)] bg-[var(--color-bg-layer-2)]">
+              <button
+                type="button"
+                onClick={() => setViewMode("er")}
+                className={`flex items-center gap-1.5 px-3 py-2 text-xs font-semibold transition ${
+                  viewMode === "er"
+                    ? "bg-[var(--color-accent)] text-[var(--color-text-inverse)]"
+                    : "text-[var(--color-text-secondary)] hover:bg-[color-mix(in_srgb,var(--color-bg-layer-2)_85%,var(--color-accent)_15%)]"
+                }`}
+              >
+                <LayoutGrid className="h-3.5 w-3.5" />
+                Cartões ER
+              </button>
+              <button
+                type="button"
+                onClick={() => setViewMode("cytoscape")}
+                className={`flex items-center gap-1.5 px-3 py-2 text-xs font-semibold transition ${
+                  viewMode === "cytoscape"
+                    ? "bg-[var(--color-accent)] text-[var(--color-text-inverse)]"
+                    : "text-[var(--color-text-secondary)] hover:bg-[color-mix(in_srgb,var(--color-bg-layer-2)_85%,var(--color-accent)_15%)]"
+                }`}
+              >
+                <Network className="h-3.5 w-3.5" />
+                Grafo (Cytoscape)
+              </button>
+            </div>
+
+            <span className="h-5 w-px bg-[var(--color-border-subtle)]" />
+
             {/* Grupo: direção do layout */}
             <div className="flex items-center overflow-hidden rounded-2xl border border-[var(--color-border-subtle)] bg-[var(--color-bg-layer-2)]">
               {(["TB", "LR"] as const).map((direction) => (
@@ -1291,87 +1381,117 @@ export default function DiagramScopeView({ connectionId }: Props) {
         ) : null}
 
         {status === "idle" && rfNodes.length > 0 ? (
-          <ReactFlow
-            nodes={rfNodes}
-            edges={edges}
-            nodeTypes={nodeTypes}
-            onNodesChange={onNodesChange}
-            onNodeClick={handleNodeClick}
-            onEdgeClick={handleEdgeClick}
-            onPaneClick={() => { if (!linkMode) { setSelectedNodeId(null); setSelectedEdgeId(null); } }}
-            onNodeDragStop={handleNodeDragStop}
-            onMoveEnd={() => {
-              if (!preferencesLoaded) return;
-              if (prefTimer.current) window.clearTimeout(prefTimer.current);
-              prefTimer.current = window.setTimeout(() => {
-                void fetch(`/api/diagram-preferences/${connectionId}`, {
-                  method: "PATCH",
-                  headers: { "content-type": "application/json" },
-                  body: JSON.stringify({ ...currentPreferences, viewport: reactFlowInstance?.getViewport() ?? null }),
-                }).catch(() => undefined);
-              }, 250);
-            }}
-            onInit={setReactFlowInstance}
-            fitView
-            fitViewOptions={{ padding: 0.14, duration: 320 }}
-            minZoom={0.2}
-            maxZoom={2.2}
-            proOptions={{ hideAttribution: true }}
-            nodesConnectable={false}
-          >
-            <Background variant={BackgroundVariant.Dots} gap={20} size={1.2} color="color-mix(in srgb, var(--color-text-muted) 35%, transparent)" />
-            {minimap ? <MiniMap pannable zoomable maskColor="color-mix(in srgb, var(--color-bg-layer-1) 88%, #000)" nodeColor={(node) => colorFor((node.data as NodeData).scope).color} className="!border !border-[var(--color-border-subtle)] !bg-[var(--color-bg-layer-1)]/95" /> : null}
-            <Controls showInteractive={false} className="!border-[var(--color-border-subtle)] !bg-[var(--color-bg-layer-1)]/90 !text-[var(--color-text-primary)]" />
-            <Panel position="top-left" style={{ marginTop: toolbarHeight + 12 }} className="w-[320px] rounded-3xl border border-[var(--color-border-subtle)] bg-[var(--color-bg-layer-1)]/95 p-4 text-sm text-[var(--color-text-primary)] shadow-[var(--shadow-floating)]">
-              <p className="text-[10px] uppercase tracking-[0.26em] text-[var(--color-text-muted)]">Workbench</p>
-              <div className="mt-3 flex flex-col gap-2">
-                <button
-                  onClick={() => setShowFilters(true)}
-                  className="rounded-2xl border border-white/10 bg-white/5 px-3 py-2 text-left text-sm text-slate-200 transition hover:bg-white/10"
-                >
-                  Escopos visíveis
-                </button>
-                <div className="rounded-2xl border border-white/10 bg-white/5 p-3">
-                  <p className="text-xs text-slate-500">Profundidade</p>
-                  <p className="mt-1 font-semibold text-white">{scopeDepth} saltos</p>
-                </div>
-                <div className="rounded-2xl border border-white/10 bg-white/5 p-3">
-                  <p className="text-xs text-slate-500">Agrupamento</p>
-                  <p className="mt-1 font-semibold text-white capitalize">{groupingMode === "domain" ? "Domínio" : groupingMode === "schema" ? "Schema" : "Prefixo"}</p>
-                </div>
-              </div>
-              {snapshots.length > 0 ? (
-                <div className="mt-4">
-                  <p className="text-[10px] uppercase tracking-[0.26em] text-slate-500">Layouts salvos</p>
-                  <div className="mt-3 space-y-2">
-                    {snapshots.map((snapshot) => (
-                      <button key={snapshot.id} onClick={() => restoreSnapshot(snapshot)} className="w-full rounded-2xl border border-white/10 bg-white/5 px-3 py-3 text-left transition hover:bg-white/10">
-                        <p className="truncate font-semibold text-white">{snapshot.name}</p>
-                        <p className="mt-1 text-xs text-slate-500">{new Date(snapshot.createdAt).toLocaleString("pt-BR")}</p>
-                      </button>
-                    ))}
+          viewMode === "er" ? (
+            <ReactFlow
+              nodes={rfNodes}
+              edges={edges}
+              nodeTypes={nodeTypes}
+              onNodesChange={onNodesChange}
+              onNodeClick={handleNodeClick}
+              onEdgeClick={handleEdgeClick}
+              onPaneClick={() => { if (!linkMode) { setSelectedNodeId(null); setSelectedEdgeId(null); } }}
+              onNodeDragStop={handleNodeDragStop}
+              onMoveEnd={() => {
+                if (!preferencesLoaded) return;
+                if (prefTimer.current) window.clearTimeout(prefTimer.current);
+                prefTimer.current = window.setTimeout(() => {
+                  void fetch(`/api/diagram-preferences/${connectionId}`, {
+                    method: "PATCH",
+                    headers: { "content-type": "application/json" },
+                    body: JSON.stringify({ ...currentPreferences, viewport: reactFlowInstance?.getViewport() ?? null }),
+                  }).catch(() => undefined);
+                }, 250);
+              }}
+              onInit={setReactFlowInstance}
+              fitView
+              fitViewOptions={{ padding: 0.14, duration: 320 }}
+              minZoom={0.2}
+              maxZoom={2.2}
+              proOptions={{ hideAttribution: true }}
+              nodesConnectable={false}
+            >
+              <Background variant={BackgroundVariant.Dots} gap={20} size={1.2} color="color-mix(in srgb, var(--color-text-muted) 35%, transparent)" />
+              {minimap ? <MiniMap pannable zoomable maskColor="color-mix(in srgb, var(--color-bg-layer-1) 88%, #000)" nodeColor={(node) => colorFor((node.data as NodeData).scope).color} className="!border !border-[var(--color-border-subtle)] !bg-[var(--color-bg-layer-1)]/95" /> : null}
+              <Controls showInteractive={false} className="!border-[var(--color-border-subtle)] !bg-[var(--color-bg-layer-1)]/90 !text-[var(--color-text-primary)]" />
+              <Panel position="top-left" style={{ marginTop: toolbarHeight + 12 }} className="w-[320px] rounded-3xl border border-[var(--color-border-subtle)] bg-[var(--color-bg-layer-1)]/95 p-4 text-sm text-[var(--color-text-primary)] shadow-[var(--shadow-floating)]">
+                <p className="text-[10px] uppercase tracking-[0.26em] text-[var(--color-text-muted)]">Workbench</p>
+                <div className="mt-3 flex flex-col gap-2">
+                  <button
+                    onClick={() => setShowFilters(true)}
+                    className="rounded-2xl border border-white/10 bg-white/5 px-3 py-2 text-left text-sm text-slate-200 transition hover:bg-white/10"
+                  >
+                    Escopos visíveis
+                  </button>
+                  <div className="rounded-2xl border border-white/10 bg-white/5 p-3">
+                    <p className="text-xs text-slate-500">Profundidade</p>
+                    <p className="mt-1 font-semibold text-white">{scopeDepth} saltos</p>
+                  </div>
+                  <div className="rounded-2xl border border-white/10 bg-white/5 p-3">
+                    <p className="text-xs text-slate-500">Agrupamento</p>
+                    <p className="mt-1 font-semibold text-white capitalize">{groupingMode === "domain" ? "Domínio" : groupingMode === "schema" ? "Schema" : "Prefixo"}</p>
                   </div>
                 </div>
+                {snapshots.length > 0 ? (
+                  <div className="mt-4">
+                    <p className="text-[10px] uppercase tracking-[0.26em] text-slate-500">Layouts salvos</p>
+                    <div className="mt-3 space-y-2">
+                      {snapshots.map((snapshot) => (
+                        <button key={snapshot.id} onClick={() => restoreSnapshot(snapshot)} className="w-full rounded-2xl border border-white/10 bg-white/5 px-3 py-3 text-left transition hover:bg-white/10">
+                          <p className="truncate font-semibold text-white">{snapshot.name}</p>
+                          <p className="mt-1 text-xs text-slate-500">{new Date(snapshot.createdAt).toLocaleString("pt-BR")}</p>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
+              </Panel>
+              {selectedNode ? (
+                <NodePanel
+                  node={selectedNode}
+                  selectedTableIds={selectedTableIds}
+                  neighborIds={selectedNodeNeighborIds}
+                  toolbarHeight={toolbarHeight}
+                  onFocus={() => focusTable(selectedNode.id)}
+                  onToggleNeighbors={toggleNeighbors}
+                  onClose={() => setSelectedNodeId(null)}
+                />
               ) : null}
-            </Panel>
-            {selectedNode ? (
-              <NodePanel
-                node={selectedNode}
-                selectedTableIds={selectedTableIds}
-                neighborIds={selectedNodeNeighborIds}
-                toolbarHeight={toolbarHeight}
-                onFocus={() => focusTable(selectedNode.id)}
-                onToggleNeighbors={toggleNeighbors}
-                onClose={() => setSelectedNodeId(null)}
+              {selectedEdge ? (
+                <EdgePanel
+                  edge={selectedEdge}
+                  onRemove={selectedEdge.data?.constraint?.startsWith("manual:") ? () => removeManualEdge(selectedEdge.id) : undefined}
+                />
+              ) : null}
+            </ReactFlow>
+          ) : (
+            <div className="h-full w-full" style={{ paddingTop: toolbarHeight + 8 }}>
+              <CytoscapeDiagram
+                nodes={visibleTables.map((t) => ({
+                  ...t,
+                  scope: tableGroupMap.get(t.id) ?? t.scope,
+                }))}
+                edges={(payload?.edges ?? []).filter(
+                  (e) => visibleTableSet.has(e.source) && visibleTableSet.has(e.target)
+                )}
+                scopes={scopes.map((s) => ({
+                  id: s.id,
+                  label: s.label,
+                  description: s.description,
+                  tables: s.tablesList.length,
+                }))}
+                selectedNodeId={selectedNodeId}
+                selectedEdgeId={selectedEdgeId}
+                onSelectNode={(nodeId) => {
+                  setSelectedNodeId(nodeId);
+                  setSelectedEdgeId(null);
+                }}
+                onSelectEdge={(edgeId) => {
+                  setSelectedEdgeId(edgeId);
+                  setSelectedNodeId(null);
+                }}
               />
-            ) : null}
-            {selectedEdge ? (
-              <EdgePanel
-                edge={selectedEdge}
-                onRemove={selectedEdge.data?.constraint?.startsWith("manual:") ? () => removeManualEdge(selectedEdge.id) : undefined}
-              />
-            ) : null}
-          </ReactFlow>
+            </div>
+          )
         ) : null}
       </div>
 

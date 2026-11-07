@@ -49,7 +49,8 @@ async function introspect(config: DriverConnectionConfig, options?: IntrospectOp
   try {
     const [tableRows] = await connection.execute<RowDataPacket[]>(
       `SELECT t.TABLE_NAME as tableName,
-              t.TABLE_SCHEMA as tableSchema
+              t.TABLE_SCHEMA as tableSchema,
+              t.TABLE_COMMENT as tableComment
          FROM INFORMATION_SCHEMA.TABLES t
         WHERE t.TABLE_SCHEMA = ?
           AND t.TABLE_TYPE = 'BASE TABLE'
@@ -62,7 +63,8 @@ async function introspect(config: DriverConnectionConfig, options?: IntrospectOp
               COLUMN_NAME as columnName,
               COLUMN_TYPE as columnType,
               IS_NULLABLE as isNullable,
-              COLUMN_KEY as columnKey
+              COLUMN_KEY as columnKey,
+              COLUMN_COMMENT as columnComment
          FROM INFORMATION_SCHEMA.COLUMNS
         WHERE TABLE_SCHEMA = ?
         ORDER BY TABLE_NAME, ORDINAL_POSITION`,
@@ -92,6 +94,7 @@ async function introspect(config: DriverConnectionConfig, options?: IntrospectOp
       tables: tableRows.map((row) => ({
         tableName: String(row.tableName),
         tableSchema: String(row.tableSchema),
+        comment: row.tableComment ? String(row.tableComment) : null,
       })),
       columns: columnRows.map((row) => ({
         tableName: String(row.tableName),
@@ -99,6 +102,7 @@ async function introspect(config: DriverConnectionConfig, options?: IntrospectOp
         columnType: String(row.columnType),
         isNullable: String(row.isNullable).toUpperCase() === "YES",
         isPrimary: String(row.columnKey ?? "") === "PRI",
+        comment: row.columnComment ? String(row.columnComment) : null,
       })),
       foreignKeys: fkRows.map((row) => ({
         constraintName: String(row.constraintName),

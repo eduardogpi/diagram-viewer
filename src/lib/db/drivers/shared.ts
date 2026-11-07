@@ -36,6 +36,7 @@ export function buildDiagramFromIntrospection(
       isNullable: row.isNullable,
       isPrimary: row.isPrimary,
       isForeign: false,
+      ...(row.comment?.trim() ? { comment: row.comment.trim() } : {}),
     });
     columnsByTable.set(row.tableName, existing);
   }
@@ -78,6 +79,7 @@ export function buildDiagramFromIntrospection(
     label: row.tableName,
     schema: row.tableSchema,
     scope: deriveScope(row.tableName, row.tableSchema),
+    ...(row.comment?.trim() ? { comment: row.comment.trim() } : {}),
     columns: columnsByTable.get(row.tableName) ?? [],
   }));
 

@@ -2,10 +2,12 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 
 import { computeDiagramDiff } from "@/lib/diagram-diff";
+import { documentationCoverage } from "@/lib/schema-documentation";
 import { prisma } from "@/lib/prisma";
 import { parseTagsJson } from "@/lib/serializers/connection";
 import {
   createAiModelingSession,
+  documentAiModelingSession,
   deleteAiModelingSession,
   exportAiModelingSql,
   exportAiModelingToPackage,
@@ -208,6 +210,14 @@ function summarizeOps(operations: SchemaOp[]): string[] {
         return `Remover tabela "${op.table}"`;
       case "renameTable":
         return `Renomear tabela "${op.table}" → "${op.newName}"`;
+      case "createIndex":
+        return `Criar índice ${op.isUnique ? "UNIQUE " : ""}"${op.name || op.columns.join("_")}" (${op.columns.join(", ")}) em "${op.table}"`;
+      case "dropIndex":
+        return `Remover índice "${op.name}" de "${op.table}"`;
+      case "setComment": {
+        const target = op.column ? `coluna "${op.table}.${op.column}"` : `tabela "${op.table}"`;
+        return op.comment.trim() ? `Comentar ${target}: "${op.comment.trim()}"` : `Remover comentário de ${target}`;
+      }
     }
   });
 }
@@ -390,7 +400,10 @@ export function buildMcpServer(): McpServer {
     {
       title: "Ver sessão de modelagem",
       description:
-        "Retorna metadados da sessão, histórico de turnos (mensagens e operações propostas) e estatísticas do diagrama atual.",
+        "Retorna metadados da sessão, histórico de turnos (mensagens e operações propostas) e estatísticas do diagrama atual. " +
+          "Cada turno traz 'status': 'active' (faz parte do estado atual) ou 'undone' (à frente do checkpoint após um " +
+          "Desfazer/modeling_revert — será descartado se uma nova mensagem/operação for enviada a partir do checkpoint). " +
+          "'timeline.checkpointOrder' = null significa que o diagrama está no último turno.",
       inputSchema: { sessionId: sessionParam, connectionId: connectionParam },
       annotations: { readOnlyHint: true },
     },
@@ -400,16 +413,28 @@ export function buildMcpServer(): McpServer {
         const ownerId = await resolveOwnerId(extra);
         const detail = await getAiModelingSession(ref.sessionId, ref.connectionId, ownerId);
         if (!detail) throw new Error("Sessão não encontrada.");
+        const checkpointOrder = detail.session.checkpointOrder ?? null;
+        const isUndone = (order: number) => checkpointOrder !== null && order > checkpointOrder;
+        const lastOrder = detail.turns.reduce((max, t) => Math.max(max, t.order), 0);
         return ok({
           session: detail.session,
           stats: {
             tables: detail.diagram.nodes.length,
             relations: detail.diagram.edges.length,
             scopes: detail.diagram.scopes.map((s) => s.id),
+            documentedTables: detail.diagram.nodes.filter((n) => n.comment).length,
+            tablesWithDocGaps: documentationCoverage(detail.diagram).gaps.length,
+          },
+          timeline: {
+            checkpointOrder,
+            lastOrder,
+            atHead: checkpointOrder === null || checkpointOrder >= lastOrder,
+            undoneTurns: detail.turns.filter((t) => isUndone(t.order)).length,
           },
           turns: detail.turns.map((t) => ({
             order: t.order,
             role: t.role,
+            status: isUndone(t.order) ? "undone" : "active",
             message: t.message,
             operations: summarizeOps(t.operations),
             createdAt: t.createdAt,
@@ -426,7 +451,8 @@ export function buildMcpServer(): McpServer {
     {
       title: "Ver diagrama da sessão",
       description:
-        "Retorna o diagrama completo (nodes com colunas/tipos/PK/FK, edges com constraints e scopes) da sessão de modelagem.",
+        "Retorna o diagrama completo (nodes com colunas/tipos/PK/FK/UNIQUE, índices, edges com constraints e scopes) da sessão de modelagem. " +
+          "Tabelas e colunas podem ter 'comment' com a documentação do seu propósito (exportado como COMMENT no SQL).",
       inputSchema: { sessionId: sessionParam, connectionId: connectionParam },
       annotations: { readOnlyHint: true },
     },
@@ -444,16 +470,109 @@ export function buildMcpServer(): McpServer {
   );
 
   server.registerTool(
+    "modeling_list_undocumented",
+    {
+      title: "Listar lacunas de documentação",
+      description:
+        "Lista tabelas sem comentário e colunas sem comentário do diagrama da sessão (colunas óbvias como id/created_at " +
+        "ficam de fora), com a cobertura atual. Use para documentar tabelas antigas: leia a estrutura com modeling_get_diagram, " +
+        "escreva os textos e aplique com modeling_apply_ops usando setComment {table, column?, comment}.",
+      inputSchema: {
+        limit: z.number().int().min(1).max(500).optional().describe("Máximo de tabelas listadas (default 100)"),
+        sessionId: sessionParam,
+        connectionId: connectionParam,
+      },
+      annotations: { readOnlyHint: true },
+    },
+    async ({ limit, sessionId, connectionId }, extra) => {
+      try {
+        const ref = await resolveSession(sessionId, connectionId, extra);
+        const ownerId = await resolveOwnerId(extra);
+        const detail = await getAiModelingSession(ref.sessionId, ref.connectionId, ownerId);
+        if (!detail) throw new Error("Sessão não encontrada.");
+        const coverage = documentationCoverage(detail.diagram);
+        const max = limit ?? 100;
+        return ok({
+          coverage: {
+            tables: coverage.tables,
+            documentedTables: coverage.documentedTables,
+            columns: coverage.columns,
+            documentedColumns: coverage.documentedColumns,
+            tablesWithGaps: coverage.gaps.length,
+          },
+          gaps: coverage.gaps.slice(0, max),
+          truncated: coverage.gaps.length > max,
+        });
+      } catch (error) {
+        return fail(error);
+      }
+    }
+  );
+
+  server.registerTool(
+    "modeling_document_tables",
+    {
+      title: "Documentar tabelas com a LLM da sessão",
+      description:
+        "Pede à LLM CONFIGURADA NA SESSÃO para escrever comentários só para tabelas/colunas que ainda não têm, em lotes, " +
+        "e grava tudo como um único passo desfazível na linha do tempo. Nunca sobrescreve comentários existentes. " +
+        "Processa até 40 tabelas por chamada (veja 'remainingTables' e chame de novo). ATENÇÃO: gasta a cota da LLM da sessão — " +
+        "se você (agente) prefere escrever os textos, use modeling_list_undocumented + modeling_apply_ops com setComment.",
+      inputSchema: {
+        tables: z.array(z.string().min(1)).max(500).optional().describe("Restringe a estas tabelas (id ou nome). Omitido = todas com lacuna."),
+        sessionId: sessionParam,
+        connectionId: connectionParam,
+      },
+    },
+    async ({ tables, sessionId, connectionId }, extra) => {
+      try {
+        const ref = await resolveSession(sessionId, connectionId, extra);
+        const ownerId = await resolveOwnerId(extra);
+        const result = await documentAiModelingSession({
+          sessionId: ref.sessionId,
+          connectionId: ref.connectionId,
+          ownerId,
+          tables,
+        });
+        if (!result) throw new Error("Sessão não encontrada.");
+
+        await logConnectionAudit({
+          action: "AI_MODELING_DOCUMENT_MCP",
+          userId: ownerId,
+          connectionId: ref.connectionId,
+          context: `${ref.sessionId}: ${result.commented.tables} tabela(s), ${result.commented.columns} coluna(s)`,
+        });
+
+        return ok({
+          commented: result.commented,
+          remainingTables: result.remainingTables,
+          failedBatches: result.failedBatches,
+          truncated: result.truncated,
+          turnOrder: result.assistantTurn?.order ?? null,
+          operationsApplied: result.assistantTurn ? summarizeOps(result.assistantTurn.operations) : [],
+          session: { id: ref.sessionId, name: ref.name },
+        });
+      } catch (error) {
+        return fail(error);
+      }
+    }
+  );
+
+  server.registerTool(
     "modeling_apply_ops",
     {
       title: "Aplicar operações de schema",
       description:
         "Aplica operações estruturadas diretamente no diagrama da sessão, SEM chamar a LLM da sessão — " +
         "você (agente) é quem analisa o pedido do usuário e produz as operações. " +
-        "Vocabulário: createTable {table, scope?, columns[{name,type,isPrimary?,isNullable?}]} | " +
-        "addColumn {table, newColumn} | alterColumn {table, column, type?, isNullable?, isPrimary?} | dropColumn {table, column} | renameColumn {table, column, newName} | " +
+        "Vocabulário: createTable {table, scope?, comment?, columns[{name,type,isPrimary?,isNullable?,isUnique?,comment?}]} | " +
+        "addColumn {table, newColumn{name,type,...,comment?}} | alterColumn {table, column, newName?, type?, isNullable?, isPrimary?, isUnique?, comment?} | " +
+        "dropColumn {table, column} | renameColumn {table, column, newName} | " +
         "addForeignKey {table, column, referencesTable, referencesColumn, onDelete?, onUpdate?} | " +
-        "dropForeignKey {table, column} | dropTable {table} | renameTable {table, newName}. " +
+        "dropForeignKey {table, column} | createIndex {table, name?, columns[], isUnique?} | dropIndex {table, name} | " +
+        "dropTable {table} | renameTable {table, newName} | " +
+        "setComment {table, column?, comment} (documenta tabela ou coluna; comment vazio remove). " +
+        "Prefira documentar o propósito de tabelas/colunas novas via 'comment' — isso fica no modelo e sai como COMMENT no SQL. " +
         "Retorna o que foi aplicado, avisos de operações rejeitadas e o diff de tabelas. " +
         "A aba 'Modelagem IA' aberta no workbench reflete a mudança automaticamente.",
       inputSchema: {

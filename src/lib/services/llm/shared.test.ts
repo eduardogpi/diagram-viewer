@@ -1,6 +1,26 @@
 import { describe, expect, it } from "vitest";
 
+import { buildResponseSchema } from "@/lib/services/llm/gemini";
 import { parseTruncatedJson } from "@/lib/services/llm/shared";
+
+describe("Gemini responseSchema", () => {
+  it("inclui alterColumn e seus atributos no schema de saída estruturada", () => {
+    const schema = buildResponseSchema() as unknown as {
+      properties: {
+        operations: {
+          items: {
+            properties: Record<string, { enum?: string[]; type: string }>;
+          };
+        };
+      };
+    };
+    const itemProps = schema.properties.operations.items.properties;
+    expect(itemProps.op.enum).toContain("alterColumn");
+    expect(itemProps.type).toBeDefined();
+    expect(itemProps.isNullable).toBeDefined();
+    expect(itemProps.isPrimary).toBeDefined();
+  });
+});
 
 describe("parseTruncatedJson", () => {
   it("fecha objeto cortado depois de uma operação completa", () => {

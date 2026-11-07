@@ -11,11 +11,14 @@ vi.mock("@/lib/services/llm", () => ({
 
 import { prisma } from "@/lib/prisma";
 import {
+  exportAiModelingSql,
+  exportAiModelingToPackage,
   getAiModelingSession,
   postAiModelingTurn,
   revertAiModelingSession,
   updateAiModelingSession,
 } from "@/lib/services/ai-modeling";
+import { createMigrationPackage, getMigrationPackage } from "@/lib/services/migrations";
 
 const OWNER = "checkpoint-test-owner";
 let connectionId = "";
@@ -58,6 +61,16 @@ afterEach(async () => {
   await prisma.aiModelingTurn.deleteMany({ where: { sessionId: { in: sessions.map((s) => s.id) } } });
   await prisma.aiModelingSession.deleteMany({ where: { ownerId: OWNER } });
   const connections = await prisma.connection.findMany({ where: { ownerId: OWNER }, select: { id: true, secretId: true } });
+  const packages = await prisma.migrationPackage.findMany({
+    where: { ownerId: OWNER },
+    select: { id: true },
+  });
+  if (packages.length > 0) {
+    const pkgIds = packages.map((p) => p.id);
+    await prisma.migrationSnapshotRow.deleteMany({ where: { packageId: { in: pkgIds } } });
+    await prisma.migrationFile.deleteMany({ where: { packageId: { in: pkgIds } } });
+    await prisma.migrationPackage.deleteMany({ where: { id: { in: pkgIds } } });
+  }
   await prisma.connection.deleteMany({ where: { ownerId: OWNER } });
   await prisma.credentialSecret.deleteMany({ where: { id: { in: connections.map((c) => c.secretId) } } });
 });
@@ -138,5 +151,58 @@ describe("checkpoints da modelagem IA", () => {
     const session = await getAiModelingSession(sessionId, connectionId, OWNER);
     expect(session!.session.provider).toBe("openrouter");
     expect(session!.session.model).toBe("meta-llama/llama-3.3-70b-instruct:free");
+  });
+
+  it("rejeita chamadas concorrentes na mesma sessão com 409 Conflict", async () => {
+    const [r1, r2] = await Promise.allSettled([
+      send("crie clientes", "clientes"),
+      send("crie pedidos", "pedidos"),
+    ]);
+    const rejected = [r1, r2].find((r) => r.status === "rejected");
+    const fulfilled = [r1, r2].find((r) => r.status === "fulfilled");
+    expect(fulfilled).toBeDefined();
+    expect(rejected).toBeDefined();
+    expect((rejected as PromiseRejectedResult).reason.message).toMatch(/em andamento/);
+  });
+
+  it("exporta migration incremental (delta e last_turn) e anexa V{N+1} a um package existente", async () => {
+    const pkg = await createMigrationPackage({
+      connectionId,
+      ownerId: OWNER,
+      name: "Pacote Base",
+      files: [{ name: "V1__init.sql", content: "CREATE TABLE usuarios (id BIGINT NOT NULL PRIMARY KEY);" }],
+    });
+
+    await send("crie clientes", "clientes");
+    await send("crie pedidos", "pedidos");
+
+    const lastTurnExport = await exportAiModelingSql({
+      sessionId,
+      connectionId,
+      ownerId: OWNER,
+      dialect: "postgres",
+      mode: "last_turn",
+    });
+    expect(lastTurnExport?.sql).toContain('CREATE TABLE "pedidos"');
+    expect(lastTurnExport?.sql).not.toContain('CREATE TABLE "clientes"');
+
+    const appended = await exportAiModelingToPackage({
+      sessionId,
+      connectionId,
+      ownerId: OWNER,
+      dialect: "postgres",
+      mode: "delta",
+      targetPackageId: pkg.id,
+      description: "add_clientes_pedidos",
+    });
+
+    expect(appended?.appendedFile).toBe("V2__add_clientes_pedidos.sql");
+    expect(appended?.fileCount).toBe(2);
+
+    const updatedPkg = await getMigrationPackage(pkg.id, connectionId, OWNER);
+    expect(updatedPkg?.files.map((f) => f.name)).toEqual([
+      "V1__init.sql",
+      "V2__add_clientes_pedidos.sql",
+    ]);
   });
 });

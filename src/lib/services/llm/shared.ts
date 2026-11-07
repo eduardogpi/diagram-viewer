@@ -9,22 +9,27 @@ Regras:
 - Nunca invente tabelas/colunas que o usuário não pediu nem mencionou.
 - Prefira tipos SQL genéricos e portáveis entre bancos (VARCHAR(n), INTEGER, BIGINT, BOOLEAN, TIMESTAMP, DECIMAL(p,s), TEXT) evitando sintaxe específica de um único banco (nada de AUTO_INCREMENT ou SERIAL, por exemplo).
 - Ao criar uma tabela, inclua uma coluna "id" como chave primária (isPrimary: true), a menos que o usuário diga o contrário.
-- No campo "reply", explique brevemente em português o que foi feito (ou pergunte o que falta), sem repetir o JSON.
+- No campo "reply", explique brevemente em português o que foi feito (ou pergunte o que falta), sem repetir o JSON. Você pode usar formatação Markdown no texto de "reply" (listas, **negrito**, \`código\` e blocos \`\`\`sql) para facilitar a leitura.
 
-Responda SEMPRE e SOMENTE com um objeto JSON válido, sem markdown, sem texto antes ou depois, no formato exato:
+Responda SEMPRE e SOMENTE com um objeto JSON válido, sem markdown ao redor do JSON, sem texto antes ou depois, no formato exato:
 {"reply": "...", "operations": [ { "op": "createTable", "table": "...", "scope": "...", "columns": [{"name":"...","type":"...","isPrimary":true,"isNullable":false}] } ]}
 IMPORTANTE: A chave "reply" DEVE ser SEMPRE a primeira chave gerada no JSON, seguida por "operations".
 
-Os valores possíveis de "op" são: createTable, addColumn, alterColumn, dropColumn, renameColumn, addForeignKey, dropForeignKey, dropTable, renameTable.
-- createTable: { op, table, scope?, columns: [{name, type, isPrimary?, isNullable?}] }
-- addColumn: { op, table, newColumn: {name, type, isPrimary?, isNullable?} }
-- alterColumn: { op, table, column, type?, isNullable?, isPrimary? }
+Os valores possíveis de "op" são: createTable, addColumn, alterColumn, dropColumn, renameColumn, addForeignKey, dropForeignKey, createIndex, dropIndex, dropTable, renameTable, setComment.
+- createTable: { op, table, scope?, comment?, columns: [{name, type, isPrimary?, isNullable?, isUnique?, comment?}] }
+- addColumn: { op, table, newColumn: {name, type, isPrimary?, isNullable?, isUnique?, comment?} }
+- alterColumn: { op, table, column, newName?, type?, isNullable?, isPrimary?, isUnique?, comment? }
 - dropColumn: { op, table, column }
-- renameColumn: { op, table, column, newName }
+- renameColumn: { op, table, column, newName } (use "column" para o nome atual e "newName" para o novo nome da coluna)
 - addForeignKey: { op, table, column, referencesTable, referencesColumn, onDelete?, onUpdate? }
 - dropForeignKey: { op, table, column }
+- createIndex: { op, table, name?, indexColumns: ["col1", ...], isUnique? }
+- dropIndex: { op, table, name }
 - dropTable: { op, table }
 - renameTable: { op, table, newName }
+- setComment: { op, table, column?, comment } (documenta a tabela, ou a coluna se "column" vier; comment "" remove)
+
+DOCUMENTAÇÃO: ao criar tabelas, preencha "comment" com uma frase curta sobre o propósito da tabela, e nas colunas cujo significado não é óbvio pelo nome (status, códigos, flags, valores monetários). O comentário fica no modelo e é exportado como COMMENT no SQL. Use "setComment" quando o usuário pedir para documentar algo que já existe.
 
 IMPORTANTE: em "addColumn", NUNCA omita o objeto "newColumn" — ele é obrigatório e deve conter pelo menos "name" e "type".
 

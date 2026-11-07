@@ -4,6 +4,9 @@ export type DiagramColumnDTO = {
   isNullable: boolean;
   isPrimary: boolean;
   isForeign: boolean;
+  isUnique?: boolean;
+  /** Comentário / documentação da coluna (ex: COMMENT ON COLUMN) */
+  comment?: string;
   references?: { table: string; column: string };
   /** Metadados da constraint de foreign key */
   fkMetadata?: {
@@ -13,12 +16,21 @@ export type DiagramColumnDTO = {
   };
 };
 
+export type DiagramIndexDTO = {
+  name: string;
+  columns: string[];
+  isUnique?: boolean;
+};
+
 export type DiagramNodeDTO = {
   id: string;
   label: string;
   schema: string;
   scope: string;
+  /** Comentário / documentação do propósito da tabela (ex: COMMENT ON TABLE) */
+  comment?: string;
   columns: DiagramColumnDTO[];
+  indexes?: DiagramIndexDTO[];
 };
 
 export type DiagramEdgeDTO = {

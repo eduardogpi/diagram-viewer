@@ -32,7 +32,12 @@ export type QueryExecutionResult = {
  * Linhas de introspecção normalizadas: cada driver traduz o catálogo do seu banco para esta
  * forma, e a montagem do DiagramResponse (agrupamento, FKs compostas, escopos) é comum a todos.
  */
-export type IntrospectedTable = { tableName: string; tableSchema: string };
+export type IntrospectedTable = {
+  tableName: string;
+  tableSchema: string;
+  /** Comentário/documentação da tabela no catálogo (vazio/ausente = sem comentário). */
+  comment?: string | null;
+};
 
 export type IntrospectedColumn = {
   tableName: string;
@@ -41,6 +46,8 @@ export type IntrospectedColumn = {
   columnType: string;
   isNullable: boolean;
   isPrimary: boolean;
+  /** Comentário/documentação da coluna no catálogo. */
+  comment?: string | null;
 };
 
 export type IntrospectedForeignKey = {

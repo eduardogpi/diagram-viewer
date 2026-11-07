@@ -13,9 +13,11 @@ type Props = {
   selectedTableId?: string | null;
   onSelectTable?: (tableId: string | null) => void;
   onApply: (operations: SchemaOp[], message: string) => Promise<void>;
+  /** Quando informado (uso em gaveta), mostra o botão de fechar no cabeçalho. */
+  onClose?: () => void;
 };
 
-export default function SchemaEditor({ diagram, disabled, selectedTableId, onSelectTable, onApply }: Props) {
+export default function SchemaEditor({ diagram, disabled, selectedTableId, onSelectTable, onApply, onClose }: Props) {
   const selected = diagram.nodes.find((n) => n.id === selectedTableId) ?? null;
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -26,6 +28,7 @@ export default function SchemaEditor({ diagram, disabled, selectedTableId, onSel
   const [newColName, setNewColName] = useState("");
   const [newColType, setNewColType] = useState("VARCHAR(255)");
   const [newColNullable, setNewColNullable] = useState(true);
+  const [newColComment, setNewColComment] = useState("");
   const [fkColumn, setFkColumn] = useState("");
   const [fkTarget, setFkTarget] = useState("");
   const [fkTargetColumn, setFkTargetColumn] = useState("id");
@@ -43,6 +46,7 @@ export default function SchemaEditor({ diagram, disabled, selectedTableId, onSel
       await onApply(ops, message);
       setNewTableName("");
       setNewColName("");
+      setNewColComment("");
       setRenameTo("");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Falha ao aplicar");
@@ -52,8 +56,25 @@ export default function SchemaEditor({ diagram, disabled, selectedTableId, onSel
   }
 
   return (
-    <div className="rounded-2xl border border-[var(--color-border-subtle)] bg-[var(--color-bg-layer-1)]/75 p-4 shadow-[var(--shadow-floating)]">
-      <p className="text-xs font-semibold uppercase tracking-[0.2em] text-[var(--color-accent)]">Editar modelo</p>
+    <div
+      className={`rounded-2xl border border-[var(--color-border-subtle)] p-4 shadow-[var(--shadow-floating)] ${
+        onClose ? "bg-[var(--color-bg-layer-1)]" : "bg-[var(--color-bg-layer-1)]/75"
+      }`}
+    >
+      <div className="flex items-center justify-between gap-2">
+        <p className="text-xs font-semibold uppercase tracking-[0.2em] text-[var(--color-accent)]">Editar modelo</p>
+        {onClose ? (
+          <button
+            type="button"
+            onClick={onClose}
+            title="Fechar editor"
+            aria-label="Fechar editor"
+            className="rounded-md px-1.5 py-0.5 text-xs text-[var(--color-text-muted)] transition hover:text-[var(--color-text-primary)]"
+          >
+            ✕
+          </button>
+        ) : null}
+      </div>
       <p className="mt-1 text-[11px] text-[var(--color-text-muted)]">
         Ajustes manuais entram no mesmo histórico da conversa — dá para desfazer pelo chat.
       </p>
@@ -157,10 +178,22 @@ export default function SchemaEditor({ diagram, disabled, selectedTableId, onSel
             </button>
           </div>
 
+          <TableCommentEditor
+            key={`${selected.id}:${selected.comment ?? ""}`}
+            comment={selected.comment ?? ""}
+            disabled={disabled || busy}
+            onSave={(comment) =>
+              void apply(
+                [{ op: "setComment", table: selected.id, comment }],
+                comment ? `Documentei a tabela ${selected.label}` : `Removi o comentário da tabela ${selected.label}`
+              )
+            }
+          />
+
           <ul className="space-y-2">
             {selected.columns.map((col) => (
               <ColumnRow
-                key={`${selected.id}.${col.name}.${col.type}.${col.isNullable}.${col.isPrimary}`}
+                key={`${selected.id}.${col.name}.${col.type}.${col.isNullable}.${col.isPrimary}.${col.comment ?? ""}`}
                 column={col}
                 disabled={disabled || busy}
                 onChange={(next) => {
@@ -177,6 +210,9 @@ export default function SchemaEditor({ diagram, disabled, selectedTableId, onSel
                       isNullable: next.isNullable !== col.isNullable ? next.isNullable : undefined,
                       isPrimary: next.isPrimary !== col.isPrimary ? next.isPrimary : undefined,
                     });
+                  }
+                  if (next.comment !== (col.comment ?? "")) {
+                    ops.push({ op: "setComment", table: selected.id, column: next.name, comment: next.comment });
                   }
                   void apply(ops, `Alterei ${selected.label}.${col.name}`);
                 }}
@@ -227,6 +263,7 @@ export default function SchemaEditor({ diagram, disabled, selectedTableId, onSel
                         type: newColType.trim() || "VARCHAR(255)",
                         isNullable: newColNullable,
                         isPrimary: false,
+                        comment: newColComment.trim() || undefined,
                       },
                     },
                   ],
@@ -237,6 +274,14 @@ export default function SchemaEditor({ diagram, disabled, selectedTableId, onSel
             >
               + Coluna
             </button>
+            <input
+              value={newColComment}
+              onChange={(e) => setNewColComment(e.target.value)}
+              maxLength={1000}
+              placeholder="comentário da nova coluna (opcional)"
+              disabled={disabled}
+              className="w-full rounded-lg border border-[var(--color-border-subtle)] bg-[var(--color-bg-layer-2)] px-2 py-1.5 text-[11px] italic focus:border-[var(--color-accent)] focus:outline-none disabled:opacity-50"
+            />
           </div>
 
           {otherTables.length > 0 ? (
@@ -343,7 +388,7 @@ function ColumnRow({
 }: {
   column: DiagramColumnDTO;
   disabled?: boolean;
-  onChange: (next: { name: string; type: string; isNullable: boolean; isPrimary: boolean }) => void;
+  onChange: (next: { name: string; type: string; isNullable: boolean; isPrimary: boolean; comment: string }) => void;
   onDrop: () => void;
   onDropFk?: () => void;
 }) {
@@ -351,12 +396,23 @@ function ColumnRow({
   const [type, setType] = useState(column.type);
   const [nullable, setNullable] = useState(column.isNullable);
   const [primary, setPrimary] = useState(column.isPrimary);
+  const [comment, setComment] = useState(column.comment ?? "");
 
   const dirty =
     name.trim() !== column.name ||
     type.trim() !== column.type ||
     nullable !== column.isNullable ||
-    primary !== column.isPrimary;
+    primary !== column.isPrimary ||
+    comment.trim() !== (column.comment ?? "");
+
+  const save = () =>
+    onChange({
+      name: name.trim(),
+      type: type.trim() || column.type,
+      isNullable: nullable,
+      isPrimary: primary,
+      comment: comment.trim(),
+    });
 
   return (
     <li className="rounded-lg border border-[var(--color-border-subtle)] bg-[var(--color-bg-layer-2)]/60 p-2">
@@ -390,9 +446,7 @@ function ColumnRow({
         <button
           type="button"
           disabled={disabled || !dirty || name.trim().length < 1}
-          onClick={() =>
-            onChange({ name: name.trim(), type: type.trim() || column.type, isNullable: nullable, isPrimary: primary })
-          }
+          onClick={save}
           className="ml-auto rounded border border-[var(--color-border-subtle)] px-1.5 py-0.5 text-[10px] disabled:opacity-40"
         >
           Salvar
@@ -406,7 +460,69 @@ function ColumnRow({
           ✕
         </button>
       </div>
+      <input
+        value={comment}
+        onChange={(e) => setComment(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" && dirty && name.trim()) save();
+        }}
+        maxLength={1000}
+        placeholder="comentário da coluna (opcional)"
+        disabled={disabled}
+        className="mt-1.5 w-full rounded border border-transparent bg-transparent px-1 py-0.5 text-[11px] italic text-[var(--color-text-secondary)] placeholder:text-[var(--color-text-muted)] focus:border-[var(--color-accent)] focus:outline-none disabled:opacity-50"
+      />
     </li>
+  );
+}
+
+/** Comentário/documentação da tabela; salvar vazio remove o comentário. */
+function TableCommentEditor({
+  comment,
+  disabled,
+  onSave,
+}: {
+  comment: string;
+  disabled?: boolean;
+  onSave: (comment: string) => void;
+}) {
+  const [value, setValue] = useState(comment);
+  const dirty = value.trim() !== comment;
+
+  return (
+    <div className="space-y-1">
+      <label className="block text-[10px] uppercase tracking-wider text-[var(--color-text-muted)]">
+        Comentário da tabela
+        <textarea
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          maxLength={1000}
+          rows={2}
+          placeholder="Para que serve esta tabela?"
+          disabled={disabled}
+          className="mt-1 w-full resize-y rounded-lg border border-[var(--color-border-subtle)] bg-[var(--color-bg-layer-2)] px-2 py-1.5 text-xs normal-case tracking-normal text-[var(--color-text-primary)] focus:border-[var(--color-accent)] focus:outline-none disabled:opacity-50"
+        />
+      </label>
+      {dirty ? (
+        <div className="flex justify-end gap-2">
+          <button
+            type="button"
+            disabled={disabled}
+            onClick={() => setValue(comment)}
+            className="rounded border border-[var(--color-border-subtle)] px-2 py-0.5 text-[10px] disabled:opacity-40"
+          >
+            Cancelar
+          </button>
+          <button
+            type="button"
+            disabled={disabled}
+            onClick={() => onSave(value.trim())}
+            className="rounded bg-[var(--color-accent)] px-2 py-0.5 text-[10px] font-semibold text-[var(--color-text-inverse)] disabled:opacity-40"
+          >
+            {value.trim() ? "Salvar comentário" : "Remover comentário"}
+          </button>
+        </div>
+      ) : null}
+    </div>
   );
 }
 

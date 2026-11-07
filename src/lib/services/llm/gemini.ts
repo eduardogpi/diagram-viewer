@@ -18,7 +18,7 @@ import {
   type LlmTurnInput,
 } from "@/lib/services/llm/shared";
 
-function buildResponseSchema(): ResponseSchema {
+export function buildResponseSchema(): ResponseSchema {
   const columnSchema: ResponseSchema = {
     type: SchemaType.OBJECT,
     properties: {
@@ -26,6 +26,7 @@ function buildResponseSchema(): ResponseSchema {
       type: { type: SchemaType.STRING },
       isPrimary: { type: SchemaType.BOOLEAN },
       isNullable: { type: SchemaType.BOOLEAN },
+      isUnique: { type: SchemaType.BOOLEAN },
     },
     required: ["name", "type"],
   };
@@ -45,24 +46,33 @@ function buildResponseSchema(): ResponseSchema {
               enum: [
                 "createTable",
                 "addColumn",
+                "alterColumn",
                 "dropColumn",
                 "renameColumn",
                 "addForeignKey",
                 "dropForeignKey",
+                "createIndex",
+                "dropIndex",
                 "dropTable",
                 "renameTable",
               ],
             },
             table: { type: SchemaType.STRING },
+            name: { type: SchemaType.STRING },
             newName: { type: SchemaType.STRING },
             scope: { type: SchemaType.STRING },
             column: { type: SchemaType.STRING },
+            type: { type: SchemaType.STRING },
+            isNullable: { type: SchemaType.BOOLEAN },
+            isPrimary: { type: SchemaType.BOOLEAN },
+            isUnique: { type: SchemaType.BOOLEAN },
             referencesTable: { type: SchemaType.STRING },
             referencesColumn: { type: SchemaType.STRING },
             onDelete: { type: SchemaType.STRING },
             onUpdate: { type: SchemaType.STRING },
             newColumn: columnSchema,
             columns: { type: SchemaType.ARRAY, items: columnSchema },
+            indexColumns: { type: SchemaType.ARRAY, items: { type: SchemaType.STRING } },
           },
           required: ["op"],
         },

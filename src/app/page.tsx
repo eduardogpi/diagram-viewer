@@ -4,6 +4,7 @@ import ConnectionForm from "@/components/connections/ConnectionForm";
 import DevSessionForm from "@/components/auth/DevSessionForm";
 import MigrationImportForm from "@/components/migrations/MigrationImportForm";
 import GettingStarted from "@/components/onboarding/GettingStarted";
+import McpStatusCard from "@/components/mcp/McpStatusCard";
 import { ThemeToggle } from "@/components/theme/ThemeToggle";
 import { getCurrentUserId } from "@/lib/auth/session";
 import { listConnectionsForUser } from "@/lib/services/connections";
@@ -58,6 +59,8 @@ export default async function Home() {
                 <MigrationImportForm />
               </div>
             </section>
+
+            <McpStatusCard />
 
             <section className="space-y-4">
               <p className="text-xs font-semibold uppercase tracking-[0.2em] text-[var(--color-text-muted)]">

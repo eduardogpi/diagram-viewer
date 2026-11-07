@@ -686,5 +686,171 @@ CREATE TABLE t (id INT, nome VARCHAR(10)) TABLESPACE users STORAGE (INITIAL 64K)
       "V1.2.10.1__b.sql",
     ]);
   });
+
+  it("resolve tabelas e colunas de forma case-insensitive preservando o nome canônico", () => {
+    const result = parseMigrations([
+      {
+        name: "V1.sql",
+        content: "CREATE TABLE usuarios (id BIGINT NOT NULL PRIMARY KEY, nome VARCHAR(60));",
+      },
+      {
+        name: "V2.sql",
+        content: `
+ALTER TABLE USUARIOS ADD COLUMN email VARCHAR(120);
+ALTER TABLE Usuarios MODIFY NOME VARCHAR(120) NOT NULL;
+CREATE TABLE pedidos (id BIGINT NOT NULL PRIMARY KEY, usuario_id BIGINT);
+ALTER TABLE PEDIDOS ADD CONSTRAINT fk_ped_usr FOREIGN KEY (USUARIO_ID) REFERENCES USUARIOS (ID);
+`,
+      },
+    ]);
+
+    expect(result.warnings).toHaveLength(0);
+    expect(result.finalDiagram.nodes.map((n) => n.id).sort()).toEqual(["pedidos", "usuarios"]);
+    const usuarios = result.finalDiagram.nodes.find((n) => n.id === "usuarios")!;
+    expect(usuarios.columns.map((c) => c.name)).toEqual(["id", "nome", "email"]);
+    expect(usuarios.columns.find((c) => c.name === "nome")).toMatchObject({
+      type: "VARCHAR(120)",
+      isNullable: false,
+    });
+
+    const edge = result.finalDiagram.edges[0];
+    expect(edge.source).toBe("pedidos");
+    expect(edge.target).toBe("usuarios");
+    expect(edge.columns).toEqual([{ source: "usuario_id", target: "id" }]);
+  });
+
+  it("reconhece ALTER TABLE ONLY e IF EXISTS (PostgreSQL)", () => {
+    const result = parseMigrations([
+      { name: "V1.sql", content: "CREATE TABLE public.contas (id BIGINT NOT NULL);" },
+      {
+        name: "V2.sql",
+        content: `
+ALTER TABLE ONLY public.contas ADD CONSTRAINT pk_contas PRIMARY KEY (id);
+ALTER TABLE IF EXISTS public.contas ADD COLUMN saldo NUMERIC(12,2) NOT NULL;
+`,
+      },
+    ]);
+    expect(result.warnings).toHaveLength(0);
+    const contas = result.finalDiagram.nodes.find((n) => n.id === "contas")!;
+    expect(contas.columns.find((c) => c.name === "id")?.isPrimary).toBe(true);
+    expect(contas.columns.find((c) => c.name === "saldo")?.type).toBe("NUMERIC(12,2)");
+  });
+
+  it("limpa ou atualiza FKs quando colunas e tabelas são renomeadas ou removidas", () => {
+    const result = parseMigrations([
+      {
+        name: "V1.sql",
+        content: `
+CREATE TABLE categorias (id BIGINT NOT NULL PRIMARY KEY);
+CREATE TABLE clientes (id BIGINT NOT NULL PRIMARY KEY);
+CREATE TABLE produtos (
+  id BIGINT NOT NULL PRIMARY KEY,
+  categoria_id BIGINT REFERENCES categorias(id),
+  cliente_id BIGINT REFERENCES clientes(id)
+);
+`,
+      },
+      {
+        name: "V2.sql",
+        content: `
+ALTER TABLE clientes RENAME COLUMN id TO cliente_pk;
+ALTER TABLE clientes RENAME TO compradores;
+ALTER TABLE produtos DROP COLUMN categoria_id;
+`,
+      },
+      {
+        name: "V3.sql",
+        content: "DROP TABLE compradores;",
+      },
+    ]);
+
+    expect(result.warnings).toHaveLength(0);
+
+    const snap2 = result.snapshots[1].diagram;
+    expect(snap2.edges).toHaveLength(1);
+    expect(snap2.edges[0]).toMatchObject({
+      source: "produtos",
+      target: "compradores",
+      columns: [{ source: "cliente_id", target: "cliente_pk" }],
+    });
+    const prodSnap2 = snap2.nodes.find((n) => n.id === "produtos")!;
+    expect(prodSnap2.columns.find((c) => c.name === "cliente_id")?.references).toEqual({
+      table: "compradores",
+      column: "cliente_pk",
+    });
+
+    const snap3 = result.snapshots[2].diagram;
+    expect(snap3.edges).toHaveLength(0);
+    const prodSnap3 = snap3.nodes.find((n) => n.id === "produtos")!;
+    const clienteCol = prodSnap3.columns.find((c) => c.name === "cliente_id")!;
+    expect(clienteCol.isForeign).toBe(false);
+    expect(clienteCol.references).toBeUndefined();
+  });
 });
 
+
+describe("migration-parser / comentários", () => {
+  it("lê COMMENT inline (MySQL) em coluna e tabela, sem confundir o texto com modificadores", () => {
+    const { finalDiagram } = parseMigrations([
+      {
+        name: "V1__init.sql",
+        content: `
+CREATE TABLE pedidos (
+  id BIGINT NOT NULL PRIMARY KEY,
+  status VARCHAR(20) COMMENT 'Situação, ex: pago, cancelado; nunca NOT NULL aqui',
+  obs TEXT COMMENT 'it''s ok'
+) ENGINE=InnoDB COMMENT='Pedidos de compra';
+`,
+      },
+    ]);
+    const node = finalDiagram.nodes[0];
+    expect(node.comment).toBe("Pedidos de compra");
+    const status = node.columns.find((c) => c.name === "status")!;
+    expect(status.comment).toBe("Situação, ex: pago, cancelado; nunca NOT NULL aqui");
+    expect(status.isNullable).toBe(true);
+    expect(status.type).toBe("VARCHAR(20)");
+    expect(node.columns.find((c) => c.name === "obs")?.comment).toBe("it's ok");
+  });
+
+  it("aplica COMMENT ON TABLE/COLUMN (Postgres/Oracle) e IS NULL remove", () => {
+    const { finalDiagram, warnings } = parseMigrations([
+      {
+        name: "V1__init.sql",
+        content: `
+CREATE TABLE public.clientes (id BIGINT PRIMARY KEY, cpf CHAR(11));
+COMMENT ON TABLE public.clientes IS 'Cadastro de clientes';
+COMMENT ON COLUMN public.clientes.cpf IS 'CPF sem máscara';
+COMMENT ON INDEX idx_qualquer IS 'ignorado';
+`,
+      },
+      {
+        name: "V2__drop_comment.sql",
+        content: `COMMENT ON TABLE clientes IS NULL;`,
+      },
+    ]);
+    expect(warnings).toEqual([]);
+    const node = finalDiagram.nodes[0];
+    expect(node.comment).toBeUndefined();
+    expect(node.columns.find((c) => c.name === "cpf")?.comment).toBe("CPF sem máscara");
+  });
+
+  it("ALTER TABLE ... COMMENT, ADD COLUMN ... COMMENT e MODIFY ... COMMENT", () => {
+    const { finalDiagram } = parseMigrations([
+      {
+        name: "V1__init.sql",
+        content: `
+CREATE TABLE cupons (id BIGINT PRIMARY KEY, codigo VARCHAR(20));
+ALTER TABLE cupons COMMENT = 'Cupons de desconto';
+ALTER TABLE cupons ADD COLUMN validade DATE COMMENT 'Último dia de uso';
+ALTER TABLE cupons MODIFY COLUMN codigo VARCHAR(40) NOT NULL COMMENT 'Código digitado no checkout';
+`,
+      },
+    ]);
+    const node = finalDiagram.nodes[0];
+    expect(node.comment).toBe("Cupons de desconto");
+    expect(node.columns.find((c) => c.name === "validade")?.comment).toBe("Último dia de uso");
+    const codigo = node.columns.find((c) => c.name === "codigo")!;
+    expect(codigo.comment).toBe("Código digitado no checkout");
+    expect(codigo.type).toBe("VARCHAR(40)");
+  });
+});

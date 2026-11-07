@@ -2,7 +2,12 @@ import { NextRequest, NextResponse } from "next/server";
 
 import { requireCurrentUserId } from "@/lib/auth/session";
 import { errorResponse } from "@/lib/errors";
-import { exportAiModelingSql, exportAiModelingToPackage } from "@/lib/services/ai-modeling";
+import {
+  exportAiModelingSql,
+  exportAiModelingToPackage,
+  isAiModelingExportMode,
+  type AiModelingExportMode,
+} from "@/lib/services/ai-modeling";
 import { findConnectionForUser } from "@/lib/services/connections";
 import { isDdlDialect, type DdlDialect } from "@/lib/services/ddl-generator";
 import { logConnectionAudit } from "@/lib/services/workspace";
@@ -25,12 +30,17 @@ export async function GET(req: NextRequest, { params }: RouteContext) {
 
     const dialect = resolveDialect(req.nextUrl.searchParams.get("dialect"));
     const databaseName = req.nextUrl.searchParams.get("database")?.trim() || undefined;
+    const rawMode = req.nextUrl.searchParams.get("mode");
+    const mode: AiModelingExportMode = isAiModelingExportMode(rawMode) ? rawMode : "full";
+    const description = req.nextUrl.searchParams.get("description")?.trim() || undefined;
     const exported = await exportAiModelingSql({
       sessionId,
       connectionId,
       ownerId: userId,
       dialect,
       databaseName,
+      mode,
+      description,
     });
     if (!exported) {
       return NextResponse.json({ error: "Sessão não encontrada" }, { status: 404 });
@@ -65,6 +75,9 @@ export async function POST(req: NextRequest, { params }: RouteContext) {
       dialect?: unknown;
       database?: unknown;
       packageName?: unknown;
+      mode?: unknown;
+      targetPackageId?: unknown;
+      description?: unknown;
     };
 
     const dialect = resolveDialect(typeof body.dialect === "string" ? body.dialect : null);
@@ -73,6 +86,13 @@ export async function POST(req: NextRequest, { params }: RouteContext) {
       typeof body.packageName === "string" && body.packageName.trim().length >= 3
         ? body.packageName.trim()
         : undefined;
+    const mode: AiModelingExportMode = isAiModelingExportMode(body.mode) ? body.mode : "full";
+    const targetPackageId =
+      typeof body.targetPackageId === "string" && body.targetPackageId.trim()
+        ? body.targetPackageId.trim()
+        : undefined;
+    const description =
+      typeof body.description === "string" && body.description.trim() ? body.description.trim() : undefined;
 
     const pkg = await exportAiModelingToPackage({
       sessionId,
@@ -81,16 +101,21 @@ export async function POST(req: NextRequest, { params }: RouteContext) {
       dialect,
       databaseName,
       packageName,
+      mode,
+      targetPackageId,
+      description,
     });
     if (!pkg) {
       return NextResponse.json({ error: "Sessão não encontrada" }, { status: 404 });
     }
 
     await logConnectionAudit({
-      action: "AI_MODELING_EXPORTED_TO_PACKAGE",
+      action: targetPackageId ? "MIGRATION_PACKAGE_APPENDED" : "AI_MODELING_EXPORTED_TO_PACKAGE",
       userId,
       connectionId,
-      context: `${pkg.name} (${dialect})`,
+      context: targetPackageId
+        ? `${pkg.name} (+${pkg.appendedFile ?? "migration"} via IA, ${dialect})`
+        : `${pkg.name} (${dialect}, ${pkg.mode ?? mode})`,
     });
 
     return NextResponse.json(pkg, { status: 201 });

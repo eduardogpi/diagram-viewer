@@ -26,7 +26,7 @@ type ParseWarning = { statement: string; reason: string };
  * com uma versão anterior continuam com o resultado antigo até serem reprocessados. Bumpe este
  * número SEMPRE que a interpretação do DDL mudar (novos dialetos, correções de reconhecimento).
  */
-export const PARSER_VERSION = 3;
+export const PARSER_VERSION = 6;
 
 type StatementResult =
   | { status: "applied" }
@@ -39,12 +39,20 @@ type ColumnState = {
   isNullable: boolean;
   isPrimary: boolean;
   isForeign: boolean;
+  isUnique?: boolean;
+  comment?: string;
   references?: { table: string; column: string };
   fkMetadata?: {
     constraintName: string;
     onDelete: "CASCADE" | "SET NULL" | "SET DEFAULT" | "RESTRICT" | "NO ACTION";
     onUpdate: "CASCADE" | "SET NULL" | "SET DEFAULT" | "RESTRICT" | "NO ACTION";
   };
+};
+
+type IndexState = {
+  name: string;
+  columns: string[];
+  isUnique?: boolean;
 };
 
 type ForeignKeyState = {
@@ -62,8 +70,11 @@ type TableState = {
   columns: Map<string, ColumnState>;
   primaryKeys: string[];
   foreignKeys: Map<string, ForeignKeyState>;
+  indexes: Map<string, IndexState>;
   /** Pasta/módulo do arquivo de migration onde a tabela foi originalmente criada. */
   module: string;
+  /** Documentação da tabela (COMMENT ON TABLE / COMMENT='...' do MySQL). */
+  comment?: string;
 };
 
 type SchemaState = {
@@ -221,6 +232,31 @@ const TYPE_KEYWORDS = new Set([
   "STORAGE",
 ]);
 
+/** Literal SQL '...' (aceita '' e escapes com barra invertida do MySQL). */
+const SQL_STRING = "'((?:[^'\\\\]|\\\\.|'')*)'";
+
+function unescapeSqlString(raw: string, backslashEscapes = true): string {
+  const unquoted = raw.replace(/''/g, "'");
+  // Postgres (standard_conforming_strings) e Oracle não tratam "\" como escape.
+  if (!backslashEscapes) return unquoted;
+  return unquoted.replace(/\\(.)/g, (_, ch: string) => (ch === "n" ? "\n" : ch === "t" ? "\t" : ch === "0" ? "" : ch));
+}
+
+/**
+ * Separa o `COMMENT '...'` de uma definição de coluna (MySQL). Devolve a definição sem o
+ * comentário para que palavras dentro do texto (ex: "não pode ser NOT NULL") não sejam lidas
+ * como modificadores da coluna.
+ */
+function extractInlineComment(rest: string): { rest: string; comment?: string } {
+  const match = new RegExp(`\\bCOMMENT\\s*=?\\s*${SQL_STRING}`, "i").exec(rest);
+  if (!match) return { rest };
+  const comment = unescapeSqlString(match[1]).trim();
+  return {
+    rest: `${rest.slice(0, match.index)} ${rest.slice(match.index + match[0].length)}`,
+    ...(comment ? { comment } : {}),
+  };
+}
+
 /** Extrai o tipo da definição de coluna, ou "UNKNOWN" quando o primeiro token é um modificador. */
 function extractColumnType(rest: string): string {
   const match = /^([A-Za-z][\w]*(?:\s*\([^)]*\))?)/.exec(rest);
@@ -245,13 +281,9 @@ const IGNORED_PREFIXES = [
   "CREATE SEQUENCE",
   "ALTER SEQUENCE",
   "DROP SEQUENCE",
-  "CREATE INDEX",
-  "CREATE UNIQUE INDEX",
-  "DROP INDEX",
   "ALTER INDEX",
   "GRANT",
   "REVOKE",
-  "COMMENT ON",
   "ANALYZE",
   "VACUUM",
   "EXPLAIN",
@@ -317,6 +349,16 @@ function compareFlywayVersions(a: number[], b: number[]): number {
   return 0;
 }
 
+function compareModules(aModule: string, bModule: string): number {
+  if (aModule === bModule) return 0;
+  // Quando um pacote tem subpastas de módulos (ex: migration/v1_auxiliar, migration/v2_...)
+  // e recebe arquivos avulsos na raiz (ex: V390__add_foreign_keys.sql anexado pelo workbench),
+  // os arquivos na raiz devem rodar DEPOIS dos módulos para encontrar as tabelas já criadas.
+  if (!aModule) return 1;
+  if (!bModule) return -1;
+  return aModule.localeCompare(bModule, "en", { numeric: true });
+}
+
 function orderFiles(files: MigrationFileInput[]): MigrationFileInput[] {
   const withOrder = files.map((file, index) => {
     const base = baseNameOf(file);
@@ -330,13 +372,13 @@ function orderFiles(files: MigrationFileInput[]): MigrationFileInput[] {
   // Flyway: ordena por módulo (caminho da pasta) e depois por versão V__ dentro do módulo.
   // Isso preserva a semântica de múltiplas pastas de migration (ex: core/V1, core/V2, billing/V1...).
   flywayFiles.sort((a, b) => {
-    const moduleCmp = a.module.localeCompare(b.module, "en", { numeric: true });
+    const moduleCmp = compareModules(a.module, b.module);
     if (moduleCmp !== 0) return moduleCmp;
     return compareFlywayVersions(a.flyway!, b.flyway!);
   });
 
   otherFiles.sort((a, b) => {
-    const moduleCmp = a.module.localeCompare(b.module, "en", { numeric: true });
+    const moduleCmp = compareModules(a.module, b.module);
     if (moduleCmp !== 0) return moduleCmp;
     return a.base.localeCompare(b.base, "en", { numeric: true });
   });
@@ -588,14 +630,22 @@ function splitTopLevelCommas(inner: string): string[] {
  * nome faria as duas virarem uma só, com as colunas mescladas silenciosamente.
  */
 function tableKey(module: string, name: string): string {
-  return `${module} ${name}`;
+  return `${module}\0${name.toLowerCase()}`;
 }
 
 function ensureTable(state: SchemaState, name: string, schema: string, module: string): TableState {
   const key = tableKey(module, name);
   let table = state.tables.get(key);
   if (!table) {
-    table = { name, schema, columns: new Map(), primaryKeys: [], foreignKeys: new Map(), module };
+    table = {
+      name,
+      schema,
+      columns: new Map(),
+      primaryKeys: [],
+      foreignKeys: new Map(),
+      indexes: new Map(),
+      module,
+    };
     state.tables.set(key, table);
   }
   return table;
@@ -609,20 +659,237 @@ function ensureTable(state: SchemaState, name: string, schema: string, module: s
  */
 function findTable(state: SchemaState, name: string, module: string): TableState | undefined {
   const sameModule = state.tables.get(tableKey(module, name));
-  if (sameModule) return sameModule;
+  if (sameModule && sameModule.columns.size > 0) return sameModule;
+  const lower = name.toLowerCase();
+  let fallback: TableState | undefined = sameModule;
   for (const table of state.tables.values()) {
-    if (table.name === name) return table;
+    if (table.name.toLowerCase() === lower) {
+      if (table.columns.size > 0) return table;
+      if (!fallback) fallback = table;
+    }
   }
-  return undefined;
+  return fallback;
 }
 
 function findTableKey(state: SchemaState, name: string, module: string): string | undefined {
   const key = tableKey(module, name);
-  if (state.tables.has(key)) return key;
+  const sameModule = state.tables.get(key);
+  if (sameModule && sameModule.columns.size > 0) return key;
+  const lower = name.toLowerCase();
+  let fallbackKey: string | undefined = sameModule ? key : undefined;
   for (const [candidateKey, table] of state.tables) {
-    if (table.name === name) return candidateKey;
+    if (table.name.toLowerCase() === lower) {
+      if (table.columns.size > 0) return candidateKey;
+      if (!fallbackKey) fallbackKey = candidateKey;
+    }
+  }
+  return fallbackKey;
+}
+
+function findColumn(table: TableState, name: string): ColumnState | undefined {
+  const exact = table.columns.get(name);
+  if (exact) return exact;
+  const lower = name.toLowerCase();
+  for (const col of table.columns.values()) {
+    if (col.name.toLowerCase() === lower) return col;
   }
   return undefined;
+}
+
+function setColumn(table: TableState, column: ColumnState): void {
+  const lower = column.name.toLowerCase();
+  for (const existingKey of Array.from(table.columns.keys())) {
+    if (existingKey !== column.name && existingKey.toLowerCase() === lower) {
+      table.columns.delete(existingKey);
+    }
+  }
+  table.columns.set(column.name, column);
+}
+
+function deleteColumn(table: TableState, name: string): string | undefined {
+  if (table.columns.has(name)) {
+    table.columns.delete(name);
+    return name;
+  }
+  const lower = name.toLowerCase();
+  for (const [key, col] of table.columns) {
+    if (col.name.toLowerCase() === lower) {
+      table.columns.delete(key);
+      return col.name;
+    }
+  }
+  return undefined;
+}
+
+function clearForeignOnTableColumnIfOrphan(table: TableState, columnName: string): void {
+  const col = findColumn(table, columnName);
+  if (!col) return;
+  const lower = col.name.toLowerCase();
+  const stillReferenced = Array.from(table.foreignKeys.values()).some((fk) =>
+    fk.columns.some((pair) => pair.source.toLowerCase() === lower)
+  );
+  if (!stillReferenced) {
+    col.isForeign = false;
+    col.references = undefined;
+    col.fkMetadata = undefined;
+  }
+}
+
+function dropColumnFromTable(state: SchemaState, table: TableState, columnName: string): void {
+  const removedName = deleteColumn(table, columnName) ?? columnName;
+  const lower = removedName.toLowerCase();
+  table.primaryKeys = table.primaryKeys.filter((pk) => pk.toLowerCase() !== lower);
+
+  for (const [idxKey, idx] of Array.from(table.indexes.entries())) {
+    if (idx.columns.some((c) => c.toLowerCase() === lower)) {
+      idx.columns = idx.columns.filter((c) => c.toLowerCase() !== lower);
+      if (idx.columns.length === 0) table.indexes.delete(idxKey);
+    }
+  }
+
+  for (const [fkKey, fk] of Array.from(table.foreignKeys.entries())) {
+    if (fk.columns.some((pair) => pair.source.toLowerCase() === lower)) {
+      table.foreignKeys.delete(fkKey);
+      for (const pair of fk.columns) {
+        if (pair.source.toLowerCase() !== lower) {
+          clearForeignOnTableColumnIfOrphan(table, pair.source);
+        }
+      }
+    }
+  }
+
+  for (const otherTable of state.tables.values()) {
+    for (const [fkKey, fk] of Array.from(otherTable.foreignKeys.entries())) {
+      if (
+        findTable(state, fk.targetTable, otherTable.module) === table &&
+        fk.columns.some((pair) => pair.target.toLowerCase() === lower)
+      ) {
+        otherTable.foreignKeys.delete(fkKey);
+        for (const pair of fk.columns) {
+          clearForeignOnTableColumnIfOrphan(otherTable, pair.source);
+        }
+      }
+    }
+    for (const col of otherTable.columns.values()) {
+      if (
+        col.references &&
+        findTable(state, col.references.table, otherTable.module) === table &&
+        col.references.column.toLowerCase() === lower
+      ) {
+        col.isForeign = false;
+        col.references = undefined;
+        col.fkMetadata = undefined;
+      }
+    }
+  }
+}
+
+function renameColumnInTable(
+  state: SchemaState,
+  table: TableState,
+  oldName: string,
+  newName: string
+): ColumnState | undefined {
+  const existing = findColumn(table, oldName);
+  if (!existing) return undefined;
+  const oldCanonical = existing.name;
+  const oldLower = oldCanonical.toLowerCase();
+
+  deleteColumn(table, oldCanonical);
+  existing.name = newName;
+  setColumn(table, existing);
+  table.primaryKeys = table.primaryKeys.map((pk) => (pk.toLowerCase() === oldLower ? newName : pk));
+
+  for (const idx of table.indexes.values()) {
+    idx.columns = idx.columns.map((c) => (c.toLowerCase() === oldLower ? newName : c));
+  }
+
+  for (const fk of table.foreignKeys.values()) {
+    if (fk.columns.some((pair) => pair.source.toLowerCase() === oldLower)) {
+      fk.columns = fk.columns.map((pair) =>
+        pair.source.toLowerCase() === oldLower ? { ...pair, source: newName } : pair
+      );
+    }
+  }
+
+  for (const otherTable of state.tables.values()) {
+    for (const fk of otherTable.foreignKeys.values()) {
+      if (
+        findTable(state, fk.targetTable, otherTable.module) === table &&
+        fk.columns.some((pair) => pair.target.toLowerCase() === oldLower)
+      ) {
+        fk.columns = fk.columns.map((pair) =>
+          pair.target.toLowerCase() === oldLower ? { ...pair, target: newName } : pair
+        );
+      }
+    }
+    for (const col of otherTable.columns.values()) {
+      if (
+        col.references &&
+        findTable(state, col.references.table, otherTable.module) === table &&
+        col.references.column.toLowerCase() === oldLower
+      ) {
+        col.references = { ...col.references, column: newName };
+      }
+    }
+  }
+
+  return existing;
+}
+
+function renameTableInState(state: SchemaState, oldName: string, newName: string, module: string): void {
+  const oldKey = findTableKey(state, oldName, module);
+  const oldTable = oldKey ? state.tables.get(oldKey) : undefined;
+  if (!oldKey || !oldTable) return;
+
+  for (const otherTable of state.tables.values()) {
+    for (const fk of otherTable.foreignKeys.values()) {
+      if (findTable(state, fk.targetTable, otherTable.module) === oldTable) {
+        fk.targetTable = newName;
+      }
+    }
+    for (const col of otherTable.columns.values()) {
+      if (col.references && findTable(state, col.references.table, otherTable.module) === oldTable) {
+        col.references = { ...col.references, table: newName };
+      }
+    }
+  }
+
+  for (const fk of oldTable.foreignKeys.values()) {
+    fk.sourceTable = newName;
+  }
+
+  state.tables.delete(oldKey);
+  oldTable.name = newName;
+  // A tabela continua pertencendo ao módulo onde foi criada, não ao do ALTER.
+  state.tables.set(tableKey(oldTable.module, newName), oldTable);
+}
+
+function dropTableFromState(state: SchemaState, tableName: string, module: string): void {
+  const key = findTableKey(state, tableName, module);
+  const dropped = key ? state.tables.get(key) : undefined;
+  if (!key || !dropped) return;
+
+  for (const otherTable of state.tables.values()) {
+    if (otherTable === dropped) continue;
+    for (const [fkKey, fk] of Array.from(otherTable.foreignKeys.entries())) {
+      if (findTable(state, fk.targetTable, otherTable.module) === dropped) {
+        otherTable.foreignKeys.delete(fkKey);
+        for (const pair of fk.columns) {
+          clearForeignOnTableColumnIfOrphan(otherTable, pair.source);
+        }
+      }
+    }
+    for (const col of otherTable.columns.values()) {
+      if (col.references && findTable(state, col.references.table, otherTable.module) === dropped) {
+        col.isForeign = false;
+        col.references = undefined;
+        col.fkMetadata = undefined;
+      }
+    }
+  }
+
+  state.tables.delete(key);
 }
 
 /** Conteúdo do primeiro par de parênteses a partir de `from`, respeitando aspas e aninhamento. */
@@ -654,9 +921,45 @@ function applyPrimaryKeyConstraint(table: TableState, part: string): void {
   for (const raw of pkMatch[1].split(",")) {
     const col = normalizeName(raw.trim());
     if (!col) continue;
-    if (!table.primaryKeys.includes(col)) table.primaryKeys.push(col);
-    const existing = table.columns.get(col);
+    const existing = findColumn(table, col);
+    const canonical = existing?.name ?? col;
+    if (!table.primaryKeys.some((pk) => pk.toLowerCase() === canonical.toLowerCase())) {
+      table.primaryKeys.push(canonical);
+    }
     if (existing) existing.isPrimary = true;
+  }
+}
+
+/** Registra constraint/índice UNIQUE ou INDEX na tabela (`UNIQUE (col)`, `CONSTRAINT uq UNIQUE (a, b)`, `INDEX idx (a)`). */
+function applyTableIndexOrUnique(table: TableState, part: string): void {
+  const isUnique = /\bUNIQUE\b/i.test(part);
+  const paren = extractBalancedParens(part, 0);
+  if (!paren) return;
+  const cols = splitTopLevelCommas(paren.inner)
+    .map((raw) => {
+      const cleaned = raw.trim().replace(/\s+(?:ASC|DESC)\b.*$/i, "").replace(/\([^)]*\)$/, "").trim();
+      const name = normalizeName(cleaned);
+      return findColumn(table, name)?.name ?? name;
+    })
+    .filter(Boolean);
+  if (cols.length === 0) return;
+
+  const constraintMatch = new RegExp(`CONSTRAINT\\s+(${ID_PART})\\s+`, "i").exec(part);
+  const indexNameMatch = new RegExp(`(?:UNIQUE\\s+)?(?:INDEX|KEY)\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?(${ID_PART})\\s*\\(`, "i").exec(part);
+  const rawName = constraintMatch?.[1] ?? indexNameMatch?.[1];
+  const idxName = rawName
+    ? normalizeName(rawName)
+    : `${isUnique ? "uq" : "idx"}_${table.name}_${cols.join("_")}`;
+
+  table.indexes.set(idxName.toLowerCase(), {
+    name: idxName,
+    columns: cols,
+    ...(isUnique ? { isUnique: true } : {}),
+  });
+
+  if (isUnique && cols.length === 1) {
+    const col = findColumn(table, cols[0]);
+    if (col && !col.isPrimary) col.isUnique = true;
   }
 }
 
@@ -680,15 +983,18 @@ function applyCreateTableAsSelect(
   const { name: tableName, schema } = parseQualifiedName(match[1], schemaName);
   const source = findTable(state, parseQualifiedName(match[3], "").name, module);
   const table = ensureTable(state, tableName, schema, module);
+  table.name = tableName;
+  table.schema = schema;
   table.module = module;
   table.columns.clear();
   table.primaryKeys = [];
   table.foreignKeys.clear();
+  table.indexes.clear();
 
   const selectList = match[2].trim();
   const copy = (name: string, alias: string) => {
-    const original = source?.columns.get(name);
-    table.columns.set(alias, {
+    const original = source ? findColumn(source, name) : undefined;
+    setColumn(table, {
       name: alias,
       type: original?.type ?? "UNKNOWN",
       isNullable: original?.isNullable ?? true,
@@ -731,10 +1037,15 @@ function applyCreateTable(
   const inner = body.inner;
 
   const table = ensureTable(state, tableName, schema, module);
+  table.name = tableName;
+  table.schema = schema;
   table.module = module;
   table.columns.clear();
   table.primaryKeys = [];
   table.foreignKeys.clear();
+  table.indexes.clear();
+  // Opções após o ")" do corpo: `ENGINE=InnoDB COMMENT='...'` (MySQL).
+  table.comment = extractInlineComment(statement.slice(body.end + 1)).comment;
 
   const parts = splitTopLevelCommas(inner);
   let columnPosition = 0;
@@ -750,6 +1061,8 @@ function applyCreateTable(
         applyForeignKeyConstraint(table, part);
       } else if (/^CONSTRAINT\s+\S+\s+PRIMARY\s+KEY/i.test(part)) {
         applyPrimaryKeyConstraint(table, part);
+      } else if (upper.includes("UNIQUE") || upper.startsWith("INDEX") || upper.startsWith("KEY")) {
+        applyTableIndexOrUnique(table, part);
       }
       continue;
     }
@@ -757,10 +1070,11 @@ function applyCreateTable(
     const columnMatch = new RegExp(`^(${ID_PART})\\s+([\\s\\S]+)$`, "i").exec(part);
     if (columnMatch) {
       const columnName = normalizeName(columnMatch[1]);
-      const rest = columnMatch[2];
+      const { rest, comment } = extractInlineComment(columnMatch[2]);
       const type = extractColumnType(rest);
       const isNullable = !/\bNOT\s+NULL\b/i.test(rest);
       const isPrimary = /\bPRIMARY\s+KEY\b/i.test(rest);
+      const isUnique = !isPrimary && /\bUNIQUE\b/i.test(rest);
       const reference = extractReferenceClause(rest);
 
       const column: ColumnState = {
@@ -769,6 +1083,8 @@ function applyCreateTable(
         isNullable,
         isPrimary,
         isForeign: !!reference,
+        ...(isUnique ? { isUnique: true } : {}),
+        ...(comment ? { comment } : {}),
       };
       if (reference) {
         column.references = { table: reference.table, column: reference.column };
@@ -787,8 +1103,8 @@ function applyCreateTable(
           onUpdate: reference.onUpdate,
         };
       }
-      table.columns.set(columnName, column);
-      if (isPrimary && !table.primaryKeys.includes(columnName)) {
+      setColumn(table, column);
+      if (isPrimary && !table.primaryKeys.some((pk) => pk.toLowerCase() === columnName.toLowerCase())) {
         table.primaryKeys.push(columnName);
       }
       columnPosition += 1;
@@ -805,7 +1121,10 @@ function applyForeignKeyConstraint(table: TableState, part: string): void {
   ).exec(part);
   if (!match) return;
 
-  const sourceCols = splitTopLevelCommas(match[1]).map((c) => normalizeName(c));
+  const sourceCols = splitTopLevelCommas(match[1]).map((c) => {
+    const raw = normalizeName(c);
+    return findColumn(table, raw)?.name ?? raw;
+  });
   const targetTable = parseQualifiedName(match[2], "").name;
   const targetCols = splitTopLevelCommas(match[3]).map((c) => normalizeName(c));
   const tail = match[4] ?? "";
@@ -833,7 +1152,7 @@ function applyForeignKeyConstraint(table: TableState, part: string): void {
   });
 
   sourceCols.forEach((sourceCol) => {
-    const column = table.columns.get(sourceCol);
+    const column = findColumn(table, sourceCol);
     if (column) {
       column.isForeign = true;
       column.references = { table: targetTable, column: targetCols[0] ?? "" };
@@ -855,9 +1174,11 @@ function applyAddedColumn(table: TableState, columnDef: string, tableName: strin
   if (!columnMatch) return;
 
   const columnName = normalizeName(columnMatch[1]);
-  const rest = columnMatch[2];
+  const { rest, comment } = extractInlineComment(columnMatch[2]);
   const isPrimary = /\bPRIMARY\s+KEY\b/i.test(rest);
+  const isUnique = !isPrimary && /\bUNIQUE\b/i.test(rest);
   const reference = extractReferenceClause(rest);
+  const canonicalTable = table.name || tableName;
 
   const column: ColumnState = {
     name: columnName,
@@ -865,14 +1186,16 @@ function applyAddedColumn(table: TableState, columnDef: string, tableName: strin
     isNullable: !/\bNOT\s+NULL\b/i.test(rest),
     isPrimary,
     isForeign: !!reference,
+    ...(isUnique ? { isUnique: true } : {}),
+    ...(comment ? { comment } : {}),
   };
 
   if (reference) {
     column.references = { table: reference.table, column: reference.column };
-    const fkName = `fk_${tableName}_${columnName}`;
+    const fkName = `fk_${canonicalTable}_${columnName}`;
     table.foreignKeys.set(fkName, {
       constraintName: fkName,
-      sourceTable: tableName,
+      sourceTable: canonicalTable,
       targetTable: reference.table,
       columns: [{ source: columnName, target: reference.column }],
       onDelete: reference.onDelete,
@@ -885,14 +1208,20 @@ function applyAddedColumn(table: TableState, columnDef: string, tableName: strin
     };
   }
 
-  table.columns.set(columnName, column);
-  if (isPrimary && !table.primaryKeys.includes(columnName)) table.primaryKeys.push(columnName);
+  setColumn(table, column);
+  if (isPrimary && !table.primaryKeys.some((pk) => pk.toLowerCase() === columnName.toLowerCase())) {
+    table.primaryKeys.push(columnName);
+  }
 }
 
 /** MODIFY/ALTER COLUMN: só o que vem explícito no statement sobrescreve o estado existente. */
-function applyModifiedColumn(table: TableState, columnName: string, rest: string): void {
-  const existing = table.columns.get(columnName);
+function applyModifiedColumn(table: TableState, columnName: string, rawRest: string): void {
+  const existing = findColumn(table, columnName);
   if (!existing) return;
+  // Só sobrescreve o comentário quando o statement traz um (conservador: no Postgres/Oracle o
+  // ALTER/MODIFY não mexe em comentários).
+  const { rest, comment } = extractInlineComment(rawRest);
+  if (/\bCOMMENT\b/i.test(rawRest) && rest !== rawRest) existing.comment = comment;
 
   // "MODIFY CPF NULL" e "ALTER COLUMN c SET DEFAULT 0" não trazem tipo — só o tipo
   // explícito (não "NULL"/"SET"/"DEFAULT") deve sobrescrever o existente.
@@ -904,8 +1233,11 @@ function applyModifiedColumn(table: TableState, columnName: string, rest: string
   else if (/\bNOT\s+NULL\b/i.test(rest)) existing.isNullable = false;
   else if (/\bNULL\b/i.test(rest) && !/\bDEFAULT\s+NULL\b/i.test(rest)) existing.isNullable = true;
 
-  if (/\bPRIMARY\s+KEY\b/i.test(rest) && !table.primaryKeys.includes(columnName)) {
-    table.primaryKeys.push(columnName);
+  if (
+    /\bPRIMARY\s+KEY\b/i.test(rest) &&
+    !table.primaryKeys.some((pk) => pk.toLowerCase() === existing.name.toLowerCase())
+  ) {
+    table.primaryKeys.push(existing.name);
     existing.isPrimary = true;
   }
 }
@@ -916,7 +1248,10 @@ function applyAlterTable(
   schemaName: string,
   module: string
 ): ParseWarning | null {
-  const match = new RegExp(`ALTER\\s+TABLE\\s+(${QUALIFIED_ID})\\s+([\\s\\S]*)$`, "i").exec(statement);
+  const match = new RegExp(
+    `^ALTER\\s+TABLE\\s+(?:ONLY\\s+)?(?:IF\\s+EXISTS\\s+)?(${QUALIFIED_ID})\\s+([\\s\\S]*)$`,
+    "i"
+  ).exec(statement);
   if (!match) {
     return { statement, reason: "ALTER TABLE não reconhecido" };
   }
@@ -952,6 +1287,9 @@ function applyAlterTable(
       upper.startsWith("ADD INDEX") ||
       upper.startsWith("ADD KEY")
     ) {
+      if (upper.includes("UNIQUE") || upper.startsWith("ADD INDEX") || upper.startsWith("ADD KEY")) {
+        applyTableIndexOrUnique(table, action.replace(/^ADD\s+/i, ""));
+      }
       continue;
     }
 
@@ -963,13 +1301,16 @@ function applyAlterTable(
         if (defUpper.includes("FOREIGN KEY")) applyForeignKeyConstraint(table, columnDef);
         else if (/^(?:CONSTRAINT\s+\S+\s+)?PRIMARY\s+KEY/i.test(columnDef)) applyPrimaryKeyConstraint(table, columnDef);
         else if (/^(?:CONSTRAINT|UNIQUE|CHECK|KEY|INDEX)\b/i.test(columnDef.trim())) continue;
-        else applyAddedColumn(table, columnDef, tableName);
+        else applyAddedColumn(table, columnDef, table.name);
       }
       continue;
     }
 
-    if (upper.startsWith("ADD COLUMN") || new RegExp(`^ADD\\s+${ID_PART}\\s+[A-Za-z]`, "i").test(action)) {
-      applyAddedColumn(table, action.replace(/^ADD\s+(?:COLUMN\s+)?/i, ""), tableName);
+    if (
+      upper.startsWith("ADD COLUMN") ||
+      new RegExp(`^ADD\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?${ID_PART}\\s+[A-Za-z]`, "i").test(action)
+    ) {
+      applyAddedColumn(table, action.replace(/^ADD\s+(?:COLUMN\s+)?(?:IF\s+NOT\s+EXISTS\s+)?/i, ""), table.name);
       continue;
     }
 
@@ -977,19 +1318,18 @@ function applyAlterTable(
     const bulkDrop = /^DROP\s*(?:COLUMN\s*)?\(([\s\S]*)\)\s*$/i.exec(action);
     if (bulkDrop) {
       for (const raw of splitTopLevelCommas(bulkDrop[1])) {
-        const columnName = normalizeName(raw);
-        table.columns.delete(columnName);
-        table.primaryKeys = table.primaryKeys.filter((pk) => pk !== columnName);
+        dropColumnFromTable(state, table, normalizeName(raw));
       }
       continue;
     }
 
-    if (upper.startsWith("DROP COLUMN") || new RegExp(`^DROP\\s+${ID_PART}$`, "i").test(action)) {
-      const dropMatch = new RegExp(`DROP\\s+(?:COLUMN\\s+)?(${ID_PART})`, "i").exec(action);
+    if (
+      upper.startsWith("DROP COLUMN") ||
+      new RegExp(`^DROP\\s+(?:IF\\s+EXISTS\\s+)?${ID_PART}(?:\\s+(?:CASCADE|RESTRICT))?$`, "i").test(action)
+    ) {
+      const dropMatch = new RegExp(`DROP\\s+(?:COLUMN\\s+)?(?:IF\\s+EXISTS\\s+)?(${ID_PART})`, "i").exec(action);
       if (dropMatch) {
-        const columnName = normalizeName(dropMatch[1]);
-        table.columns.delete(columnName);
-        table.primaryKeys = table.primaryKeys.filter((pk) => pk !== columnName);
+        dropColumnFromTable(state, table, normalizeName(dropMatch[1]));
       }
       continue;
     }
@@ -1002,18 +1342,18 @@ function applyAlterTable(
       if (changeMatch) {
         const oldName = normalizeName(changeMatch[1]);
         const newName = normalizeName(changeMatch[2]);
-        const rest2 = changeMatch[3];
+        const { rest: rest2, comment } = extractInlineComment(changeMatch[3]);
         const type = extractColumnType(rest2);
-        const existing = table.columns.get(oldName);
+        const existing = renameColumnInTable(state, table, oldName, newName);
         if (existing) {
-          table.columns.delete(oldName);
-          existing.name = newName;
+          // CHANGE redefine a coluna inteira no MySQL: sem COMMENT, o comentário some.
+          existing.comment = comment;
           if (type !== "UNKNOWN") existing.type = type;
           existing.isNullable = !/\bNOT\s+NULL\b/i.test(rest2);
-          table.columns.set(newName, existing);
-
-          table.primaryKeys = table.primaryKeys.map((pk) => (pk === oldName ? newName : pk));
-          if (/\bPRIMARY\s+KEY\b/i.test(rest2) && !table.primaryKeys.includes(newName)) {
+          if (
+            /\bPRIMARY\s+KEY\b/i.test(rest2) &&
+            !table.primaryKeys.some((pk) => pk.toLowerCase() === newName.toLowerCase())
+          ) {
             table.primaryKeys.push(newName);
             existing.isPrimary = true;
           }
@@ -1041,12 +1381,18 @@ function applyAlterTable(
     }
 
     if (upper.startsWith("DROP FOREIGN KEY") || upper.startsWith("DROP CONSTRAINT")) {
-      const dropMatch = new RegExp(`DROP\\s+(?:FOREIGN\\s+KEY|CONSTRAINT)\\s+(${ID_PART})`, "i").exec(action);
+      const dropMatch = new RegExp(
+        `DROP\\s+(?:FOREIGN\\s+KEY|CONSTRAINT)\\s+(?:IF\\s+EXISTS\\s+)?(${ID_PART})`,
+        "i"
+      ).exec(action);
       if (dropMatch) {
         const fkName = normalizeName(dropMatch[1]);
-        table.foreignKeys.delete(fkName);
+        const fkLower = fkName.toLowerCase();
+        for (const key of Array.from(table.foreignKeys.keys())) {
+          if (key.toLowerCase() === fkLower) table.foreignKeys.delete(key);
+        }
         table.columns.forEach((col) => {
-          if (col.fkMetadata?.constraintName === fkName) {
+          if (col.fkMetadata?.constraintName.toLowerCase() === fkLower) {
             col.isForeign = false;
             col.references = undefined;
             col.fkMetadata = undefined;
@@ -1064,14 +1410,15 @@ function applyAlterTable(
       if (renameMatch) {
         const oldName = normalizeName(renameMatch[1]);
         const newName = normalizeName(renameMatch[2]);
-        const column = table.columns.get(oldName);
-        if (column) {
-          column.name = newName;
-          table.columns.delete(oldName);
-          table.columns.set(newName, column);
-          table.primaryKeys = table.primaryKeys.map((pk) => (pk === oldName ? newName : pk));
-        }
+        renameColumnInTable(state, table, oldName, newName);
       }
+      continue;
+    }
+
+    // MySQL: ALTER TABLE t COMMENT = '...'
+    const tableComment = new RegExp(`^COMMENT\\s*=?\\s*${SQL_STRING}\\s*$`, "i").exec(action);
+    if (tableComment) {
+      table.comment = unescapeSqlString(tableComment[1]).trim() || undefined;
       continue;
     }
 
@@ -1079,14 +1426,7 @@ function applyAlterTable(
       const renameMatch = new RegExp(`RENAME\\s+TO\\s+(${ID_PART})`, "i").exec(action);
       if (renameMatch) {
         const newName = normalizeName(renameMatch[1]);
-        const oldKey = findTableKey(state, tableName, module);
-        const oldTable = oldKey ? state.tables.get(oldKey) : undefined;
-        if (oldKey && oldTable) {
-          state.tables.delete(oldKey);
-          oldTable.name = newName;
-          // A tabela continua pertencendo ao módulo onde foi criada, não ao do ALTER.
-          state.tables.set(tableKey(oldTable.module, newName), oldTable);
-        }
+        renameTableInState(state, tableName, newName, module);
       }
       continue;
     }
@@ -1116,8 +1456,7 @@ function applyDropTable(state: SchemaState, statement: string, module: string): 
     return { statement, reason: "DROP TABLE não reconhecido" };
   }
   const tableName = parseQualifiedName(match[1], "").name;
-  const key = findTableKey(state, tableName, module);
-  if (key) state.tables.delete(key);
+  dropTableFromState(state, tableName, module);
   return null;
 }
 
@@ -1131,14 +1470,94 @@ function applyRenameTable(state: SchemaState, statement: string, module: string)
   }
   const oldName = parseQualifiedName(match[1], "").name;
   const newName = parseQualifiedName(match[2], "").name;
-  const oldKey = findTableKey(state, oldName, module);
-  const table = oldKey ? state.tables.get(oldKey) : undefined;
-  if (oldKey && table) {
-    state.tables.delete(oldKey);
-    table.name = newName;
-    state.tables.set(tableKey(table.module, newName), table);
+  renameTableInState(state, oldName, newName, module);
+  return null;
+}
+
+function applyCreateIndex(state: SchemaState, statement: string, module: string): ParseWarning | null {
+  const match = new RegExp(
+    `^CREATE\\s+(UNIQUE\\s+)?(?:BITMAP\\s+|FULLTEXT\\s+|SPATIAL\\s+)?INDEX\\s+(?:CONCURRENTLY\\s+)?(?:IF\\s+NOT\\s+EXISTS\\s+)?(${QUALIFIED_ID})\\s+ON\\s+(?:ONLY\\s+)?(${QUALIFIED_ID})(?:\\s+USING\\s+\\w+)?\\s*(?=\\()`,
+    "i"
+  ).exec(statement);
+  const body = match ? extractBalancedParens(statement, match[0].length) : null;
+  if (!match || !body) {
+    return null;
+  }
+  const isUnique = Boolean(match[1]);
+  const indexName = parseQualifiedName(match[2], "").name;
+  const tableName = parseQualifiedName(match[3], "").name;
+  const table = findTable(state, tableName, module);
+  if (!table) return null;
+
+  const cols = splitTopLevelCommas(body.inner)
+    .map((raw) => {
+      const cleaned = raw.trim().replace(/\s+(?:ASC|DESC|NULLS\s+(?:FIRST|LAST))\b.*$/i, "").replace(/\([^)]*\)$/, "").trim();
+      const name = normalizeName(cleaned);
+      return findColumn(table, name)?.name ?? name;
+    })
+    .filter(Boolean);
+
+  if (cols.length > 0) {
+    table.indexes.set(indexName.toLowerCase(), {
+      name: indexName,
+      columns: cols,
+      ...(isUnique ? { isUnique: true } : {}),
+    });
+    if (isUnique && cols.length === 1) {
+      const col = findColumn(table, cols[0]);
+      if (col && !col.isPrimary) col.isUnique = true;
+    }
   }
   return null;
+}
+
+function applyDropIndex(state: SchemaState, statement: string, module: string): ParseWarning | null {
+  const match = new RegExp(
+    `^DROP\\s+INDEX\\s+(?:CONCURRENTLY\\s+)?(?:IF\\s+EXISTS\\s+)?(${QUALIFIED_ID})(?:\\s+ON\\s+(${QUALIFIED_ID}))?`,
+    "i"
+  ).exec(statement);
+  if (!match) return null;
+  const indexName = parseQualifiedName(match[1], "").name.toLowerCase();
+  const tableName = match[2] ? parseQualifiedName(match[2], "").name : null;
+
+  if (tableName) {
+    const table = findTable(state, tableName, module);
+    table?.indexes.delete(indexName);
+  } else {
+    for (const table of state.tables.values()) {
+      table.indexes.delete(indexName);
+    }
+  }
+  return null;
+}
+
+/**
+ * `COMMENT ON TABLE t IS '...'` / `COMMENT ON COLUMN t.c IS '...'` (Postgres/Oracle). `IS NULL`
+ * ou `IS ''` remove. Outros alvos (INDEX, VIEW, ...) não aparecem no diagrama e são ignorados.
+ */
+function applyCommentOn(state: SchemaState, statement: string, module: string): StatementResult {
+  const match = new RegExp(
+    `^COMMENT\\s+ON\\s+(TABLE|COLUMN)\\s+(${QUALIFIED_ID})\\s+IS\\s+(?:${SQL_STRING}|NULL)\\s*;?\\s*$`,
+    "i"
+  ).exec(statement);
+  if (!match) return { status: "ignored" };
+
+  const parts = splitQualifiedName(match[2]).map(normalizeName);
+  const text = match[3] !== undefined ? unescapeSqlString(match[3], false).trim() || undefined : undefined;
+
+  if (match[1].toUpperCase() === "TABLE") {
+    const table = findTable(state, parts[parts.length - 1], module);
+    if (!table) return { status: "unsupported", warning: { statement, reason: "COMMENT ON TABLE de tabela desconhecida" } };
+    table.comment = text;
+    return { status: "applied" };
+  }
+
+  if (parts.length < 2) return { status: "unsupported", warning: { statement, reason: "COMMENT ON COLUMN sem tabela" } };
+  const table = findTable(state, parts[parts.length - 2], module);
+  const column = table ? findColumn(table, parts[parts.length - 1]) : undefined;
+  if (!column) return { status: "unsupported", warning: { statement, reason: "COMMENT ON COLUMN de coluna desconhecida" } };
+  column.comment = text;
+  return { status: "applied" };
 }
 
 function applyStatement(
@@ -1151,6 +1570,7 @@ function applyStatement(
   if (!trimmed) return { status: "ignored" };
   const upper = trimmed.toUpperCase();
 
+  if (/^COMMENT\s+ON\b/.test(upper)) return applyCommentOn(state, trimmed, module);
   if (isIgnoredStatement(upper)) return { status: "ignored" };
 
   const applied = (warning: ParseWarning | null): StatementResult =>
@@ -1160,12 +1580,27 @@ function applyStatement(
   if (upper.startsWith("ALTER TABLE")) return applied(applyAlterTable(state, trimmed, schemaName, module));
   if (upper.startsWith("DROP TABLE")) return applied(applyDropTable(state, trimmed, module));
   if (upper.startsWith("RENAME TABLE")) return applied(applyRenameTable(state, trimmed, module));
+  if (/^CREATE\s+(?:UNIQUE\s+|BITMAP\s+|FULLTEXT\s+|SPATIAL\s+)?INDEX\b/.test(upper)) {
+    return applied(applyCreateIndex(state, trimmed, module));
+  }
+  if (upper.startsWith("DROP INDEX")) return applied(applyDropIndex(state, trimmed, module));
 
   return { status: "unsupported", warning: { statement: trimmed, reason: "Statement não suportado pelo parser" } };
 }
 
 function scopeOf(table: TableState): string {
   return moduleLastSegment(table.module) || deriveScope(table.name, table.schema);
+}
+
+const FLYWAY_METADATA_TABLES = new Set([
+  "flyway_schema_history",
+  "schema_version",
+]);
+
+function isRenderableTable(table: TableState): boolean {
+  if (table.columns.size === 0) return false;
+  if (FLYWAY_METADATA_TABLES.has(table.name.toLowerCase())) return false;
+  return true;
 }
 
 /**
@@ -1177,21 +1612,24 @@ function scopeOf(table: TableState): string {
 function buildNodeIds(state: SchemaState): Map<string, string> {
   const modulesByName = new Map<string, Set<string>>();
   for (const table of state.tables.values()) {
-    const modules = modulesByName.get(table.name) ?? new Set<string>();
+    if (!isRenderableTable(table)) continue;
+    const lowerName = table.name.toLowerCase();
+    const modules = modulesByName.get(lowerName) ?? new Set<string>();
     modules.add(table.module);
-    modulesByName.set(table.name, modules);
+    modulesByName.set(lowerName, modules);
   }
 
   const ids = new Map<string, string>();
   const used = new Map<string, number>();
   for (const [key, table] of state.tables) {
-    const ambiguous = (modulesByName.get(table.name)?.size ?? 1) > 1;
+    if (!isRenderableTable(table)) continue;
+    const ambiguous = (modulesByName.get(table.name.toLowerCase())?.size ?? 1) > 1;
     let id = ambiguous ? `${scopeOf(table)}.${table.name}` : table.name;
     // Dois módulos podem terminar com o mesmo segmento (a/db e b/db): aí cai no caminho completo.
-    if (ambiguous && used.has(id)) {
+    if (ambiguous && used.has(id.toLowerCase())) {
       id = `${table.module}.${table.name}`;
     }
-    used.set(id, (used.get(id) ?? 0) + 1);
+    used.set(id.toLowerCase(), (used.get(id.toLowerCase()) ?? 0) + 1);
     ids.set(key, id);
   }
   return ids;
@@ -1209,29 +1647,44 @@ function buildDiagram(state: SchemaState): DiagramResponse {
     return (key && nodeIds.get(key)) ?? targetName;
   };
 
+  const targetColumnOf = (targetName: string, colName: string, module: string): string => {
+    const targetTable = findTable(state, targetName, module);
+    const targetCol = targetTable ? findColumn(targetTable, colName) : undefined;
+    return targetCol?.name ?? colName;
+  };
+
   for (const [key, table] of state.tables) {
-    const nodeId = nodeIds.get(key)!;
+    const nodeId = nodeIds.get(key);
+    if (!nodeId) continue;
     const columns: DiagramColumnDTO[] = Array.from(table.columns.values()).map((col) => ({
       name: col.name,
       type: col.type,
       isNullable: col.isNullable,
       isPrimary: col.isPrimary,
       isForeign: col.isForeign,
+      ...(col.isUnique ? { isUnique: true } : {}),
+      ...(col.comment ? { comment: col.comment } : {}),
       // A referência aponta para o id do nó, não para o nome cru, senão o destaque de relação
       // no diagrama erraria o alvo quando há homônimas em módulos diferentes.
       references: col.references
-        ? { table: targetIdOf(col.references.table, table.module), column: col.references.column }
+        ? {
+            table: targetIdOf(col.references.table, table.module),
+            column: targetColumnOf(col.references.table, col.references.column, table.module),
+          }
         : undefined,
       fkMetadata: col.fkMetadata,
     }));
 
+    const indexes = Array.from(table.indexes.values());
     const scope = scopeOf(table);
     nodes.push({
       id: nodeId,
       label: table.name,
       schema: table.schema,
       scope,
+      ...(table.comment ? { comment: table.comment } : {}),
       columns,
+      ...(indexes.length > 0 ? { indexes } : {}),
     });
 
     if (!scopeMap.has(scope)) {
@@ -1252,7 +1705,10 @@ function buildDiagram(state: SchemaState): DiagramResponse {
         target: targetId,
         scope,
         constraint: fk.constraintName,
-        columns: fk.columns,
+        columns: fk.columns.map((pair) => ({
+          source: findColumn(table, pair.source)?.name ?? pair.source,
+          target: targetColumnOf(fk.targetTable, pair.target, table.module),
+        })),
         onDelete: fk.onDelete,
         onUpdate: fk.onUpdate,
       });

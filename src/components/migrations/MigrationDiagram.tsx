@@ -19,8 +19,14 @@ import ReactFlow, {
   type ReactFlowInstance,
 } from "reactflow";
 import "reactflow/dist/style.css";
-import { Maximize2, Minimize2, Waypoints, X } from "lucide-react";
+import { ChevronDown, Filter, LayoutGrid, Maximize2, Minimize2, Network, PencilRuler, Waypoints, X } from "lucide-react";
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import CytoscapeDiagram from "@/components/migrations/CytoscapeDiagram";
+import {
+  computeDetailedDiagramDiff,
+  type ColumnChangeDetail,
+  type TableDetailedDiff,
+} from "@/lib/diagram-diff";
 
 const EDGE_COLOR = "#0891b2";
 const EDGE_COLOR_SELECTED = "#22d3ee";
@@ -41,11 +47,23 @@ function humanizeScope(value: string): string {
 type Column = {
   name: string;
   type: string;
+  isNullable?: boolean;
   isPrimary: boolean;
   isForeign: boolean;
+  isUnique?: boolean;
+  comment?: string;
   references?: { table: string; column: string };
 };
-type TableNode = { id: string; label: string; schema: string; scope: string; columns: Column[] };
+type TableIndex = { name: string; columns: string[]; isUnique?: boolean };
+type TableNode = {
+  id: string;
+  label: string;
+  schema: string;
+  scope: string;
+  comment?: string;
+  columns: Column[];
+  indexes?: TableIndex[];
+};
 type Relationship = {
   id: string;
   source: string;
@@ -64,8 +82,10 @@ type NodeData = {
   label: string;
   schema: string;
   scope: string;
+  comment?: string;
   columns: Column[];
   status?: "added" | "altered" | "removed";
+  detailedDiff?: TableDetailedDiff;
   /** Posições (0-1) dos handles de entrada/saída, distribuídas quando o nó tem múltiplas relações. */
   topHandlePositions: number[];
   bottomHandlePositions: number[];
@@ -90,6 +110,26 @@ type DiffStatus = "added" | "altered" | "removed" | undefined;
 const NODE_W = 320;
 const NODE_H_BASE = 48;
 const NODE_H_PER_COLUMN = 22;
+/**
+ * O comentário da tabela aparece inteiro no card (quebrando linha), então a altura usada no
+ * layout precisa estimar quantas linhas ele ocupa — senão o dagre posiciona os cards por cima uns
+ * dos outros. Estimativa por caracteres: texto 11px itálico na largura útil do card (~296px).
+ */
+const COMMENT_CHARS_PER_LINE = 46;
+const COMMENT_LINE_H = 17;
+const COMMENT_PADDING_H = 8;
+
+function commentLineCount(comment: string): number {
+  return comment
+    .split(/\r?\n/)
+    .reduce((total, paragraph) => total + Math.max(1, Math.ceil(paragraph.trim().length / COMMENT_CHARS_PER_LINE)), 0);
+}
+
+function nodeHeight(node: { columns: unknown[]; comment?: string }): number {
+  const comment = node.comment?.trim();
+  const commentH = comment ? COMMENT_PADDING_H + commentLineCount(comment) * COMMENT_LINE_H : 0;
+  return NODE_H_BASE + node.columns.length * NODE_H_PER_COLUMN + commentH;
+}
 
 const STATUS_BORDER: Record<NonNullable<DiffStatus>, string> = {
   added: "border-emerald-400",
@@ -173,23 +213,84 @@ const TableNodeComponent = memo(function TableNodeComponent({ id, data }: NodePr
         ) : null}
         <span className="ml-auto text-[10px] uppercase tracking-wider text-slate-500">{data.scope}</span>
       </div>
+      {data.comment ? (
+        <div className="whitespace-pre-wrap break-words border-b border-slate-800 px-3 py-1 text-[11px] italic leading-[17px] text-slate-400">
+          {data.comment}
+        </div>
+      ) : null}
       <div className="max-h-[280px] overflow-y-auto">
         {data.columns.length === 0 ? (
           <div className="px-3 py-2 text-xs text-slate-500">sem colunas</div>
         ) : (
-          data.columns.map((col) => (
-            <div
-              key={col.name}
-              className="flex items-center gap-2 border-b border-slate-900/60 px-3 py-1 text-xs"
-            >
-              <span className="w-3 text-center">
-                {col.isPrimary ? <span className="text-amber-300" title="Primary key">PK</span> : col.isForeign ? <span className="text-cyan-300" title="Foreign key">FK</span> : null}
-              </span>
-              <span className="truncate text-slate-200">{col.name}</span>
-              <span className="ml-auto truncate text-slate-500">{col.type}</span>
-            </div>
-          ))
+          data.columns.map((col) => {
+            const colDiff: ColumnChangeDetail | undefined =
+              status === "altered" ? data.detailedDiff?.columns.get(col.name) : undefined;
+            const rowClass =
+              colDiff?.status === "added"
+                ? "bg-emerald-500/10"
+                : colDiff?.status === "altered"
+                  ? "bg-amber-500/10"
+                  : "";
+            const titleText =
+              [col.comment, colDiff ? colDiff.changes.join(" · ") : undefined].filter(Boolean).join("\n") || undefined;
+            return (
+              <div
+                key={col.name}
+                title={titleText}
+                className={`flex items-center gap-2 border-b border-slate-900/60 px-3 py-1 text-xs ${rowClass}`}
+              >
+                <span className="w-4 text-center">
+                  {col.isPrimary ? (
+                    <span className="text-amber-300" title="Primary key">
+                      PK
+                    </span>
+                  ) : col.isForeign ? (
+                    <span className="text-cyan-300" title="Foreign key">
+                      FK
+                    </span>
+                  ) : col.isUnique ? (
+                    <span className="text-violet-300" title="Unique constraint">
+                      UQ
+                    </span>
+                  ) : null}
+                </span>
+                {colDiff?.status === "added" ? (
+                  <span className="shrink-0 font-mono text-[10px] font-bold text-emerald-400" title={titleText}>
+                    +
+                  </span>
+                ) : colDiff?.status === "altered" ? (
+                  <span className="shrink-0 font-mono text-[10px] font-bold text-amber-400" title={titleText}>
+                    ~
+                  </span>
+                ) : null}
+                <span className="truncate text-slate-200">{col.name}</span>
+                {col.comment ? (
+                  <span className="shrink-0 text-[10px] text-slate-500" aria-label="Coluna documentada">
+                    ⓘ
+                  </span>
+                ) : null}
+                <span className="ml-auto truncate text-slate-500">
+                  {colDiff?.status === "altered" && colDiff.previousType && colDiff.previousType !== col.type ? (
+                    <span>
+                      <span className="line-through opacity-60">{colDiff.previousType}</span>{" "}
+                      <span className="text-amber-300">{col.type}</span>
+                    </span>
+                  ) : (
+                    col.type
+                  )}
+                </span>
+              </div>
+            );
+          })
         )}
+        {status === "altered" && data.detailedDiff && data.detailedDiff.removedColumns.length > 0 ? (
+          <div
+            className="border-t border-rose-500/20 bg-rose-500/10 px-3 py-1 text-[11px] text-rose-300"
+            title={data.detailedDiff.removedColumns.map((c) => `${c.name} (${c.previousType ?? ""})`).join(", ")}
+          >
+            − {data.detailedDiff.removedColumns.map((c) => c.name).join(", ")}
+          </div>
+        ) : null}
       </div>
       {bottomHandles.map((pct, i) => (
         <Handle
@@ -215,7 +316,8 @@ function layoutNodes(
   nodes: TableNode[],
   edges: Relationship[],
   scopes: Scope[],
-  diffMap?: Map<string, DiffStatus>
+  diffMap?: Map<string, DiffStatus>,
+  detailedDiffMap?: Map<string, TableDetailedDiff>
 ) {
   const g = new dagre.graphlib.Graph();
   g.setGraph({ rankdir: "TB", nodesep: 60, ranksep: 80, ranker: "network-simplex" });
@@ -228,7 +330,7 @@ function layoutNodes(
   });
 
   nodes.forEach((node) => {
-    const height = NODE_H_BASE + node.columns.length * NODE_H_PER_COLUMN;
+    const height = nodeHeight(node);
     g.setNode(node.id, { width: NODE_W, height });
   });
   edges.forEach((edge) => {
@@ -281,7 +383,7 @@ function layoutNodes(
   if (showGroups) {
     nodes.forEach((node) => {
       const pos = g.node(node.id);
-      const height = NODE_H_BASE + node.columns.length * NODE_H_PER_COLUMN;
+      const height = nodeHeight(node);
       const left = (pos?.x ?? 0) - NODE_W / 2;
       const top = (pos?.y ?? 0) - height / 2;
       const current = groupBounds.get(node.scope) ?? { minX: left, minY: top, maxX: left + NODE_W, maxY: top + height };
@@ -318,7 +420,7 @@ function layoutNodes(
   const rfNodes: Node<NodeData>[] = nodes.map((node) => {
     const pos = g.node(node.id);
     const status = diffMap?.get(node.id);
-    const height = NODE_H_BASE + node.columns.length * NODE_H_PER_COLUMN;
+    const height = nodeHeight(node);
     const absX = (pos?.x ?? 0) - NODE_W / 2;
     const absY = (pos?.y ?? 0) - height / 2;
     const parentId = showGroups ? groupNodeId(node.scope) : undefined;
@@ -335,8 +437,10 @@ function layoutNodes(
         label: node.label,
         schema: node.schema,
         scope: node.scope,
+        comment: node.comment,
         columns: node.columns,
         status,
+        detailedDiff: detailedDiffMap?.get(node.id),
         tone: colorFor(node.scope),
         topHandlePositions: handlePositions(incomingByNode.get(node.id)?.length ?? 0),
         bottomHandlePositions: handlePositions(outgoingByNode.get(node.id)?.length ?? 0),
@@ -365,24 +469,47 @@ function layoutNodes(
 function NodePanel({
   node,
   relationCount,
+  detailedDiff,
+  showColumnList = false,
+  floatingOverlay = false,
   onFocus,
+  onEdit,
   onClose,
 }: {
   node: TableNode;
   relationCount: number;
-  onFocus: () => void;
+  detailedDiff?: TableDetailedDiff;
+  showColumnList?: boolean;
+  floatingOverlay?: boolean;
+  onFocus?: () => void;
+  onEdit?: () => void;
   onClose: () => void;
 }) {
-  return (
-    <Panel
-      position="top-right"
-      className="w-[300px] rounded-2xl border border-slate-700 bg-slate-950/92 p-4 text-sm text-slate-300 shadow-2xl"
-    >
+  const columnChanges = detailedDiff
+    ? Array.from(detailedDiff.columns.values())
+    : [];
+
+  const content = (
+    <>
       <div className="flex items-start justify-between gap-2">
         <div className="min-w-0">
-          <p className="text-[10px] uppercase tracking-[0.26em] text-slate-500">Tabela selecionada</p>
+          <div className="flex items-center gap-2">
+            <p className="text-[10px] uppercase tracking-[0.26em] text-slate-500">Tabela selecionada</p>
+            {detailedDiff?.status === "added" ? (
+              <span className="rounded-full bg-emerald-500/20 px-2 py-0.5 text-[10px] font-medium text-emerald-300">
+                nova
+              </span>
+            ) : detailedDiff?.status === "altered" ? (
+              <span className="rounded-full bg-amber-500/20 px-2 py-0.5 text-[10px] font-medium text-amber-300">
+                alterada
+              </span>
+            ) : null}
+          </div>
           <h4 className="mt-2 truncate text-base font-semibold text-white">{node.label}</h4>
           <p className="mt-1 truncate font-mono text-xs text-slate-500">{node.schema}</p>
+          {node.comment ? (
+            <p className="mt-2 whitespace-pre-wrap text-xs leading-relaxed text-slate-300">{node.comment}</p>
+          ) : null}
         </div>
         <button
           type="button"
@@ -394,13 +521,28 @@ function NodePanel({
         </button>
       </div>
 
-      <button
-        type="button"
-        onClick={onFocus}
-        className="mt-3 w-full rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs font-semibold text-slate-200 transition hover:border-cyan-400"
-      >
-        Centralizar
-      </button>
+      {onFocus || onEdit ? (
+        <div className="mt-3 flex gap-2">
+          {onFocus ? (
+            <button
+              type="button"
+              onClick={onFocus}
+              className="flex-1 rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs font-semibold text-slate-200 transition hover:border-cyan-400"
+            >
+              Centralizar
+            </button>
+          ) : null}
+          {onEdit ? (
+            <button
+              type="button"
+              onClick={onEdit}
+              className="flex flex-1 items-center justify-center gap-1 rounded-xl border border-cyan-400/40 bg-cyan-400/10 px-3 py-2 text-xs font-semibold text-cyan-200 transition hover:border-cyan-300"
+            >
+              <PencilRuler className="h-3.5 w-3.5" /> Editar tabela
+            </button>
+          ) : null}
+        </div>
+      ) : null}
 
       <div className="mt-3 grid grid-cols-2 gap-2">
         <div className="rounded-xl border border-white/10 bg-white/5 p-2.5">
@@ -412,17 +554,122 @@ function NodePanel({
           <p className="mt-0.5 font-semibold text-white">{relationCount}</p>
         </div>
       </div>
+
+      {showColumnList && node.columns.length > 0 ? (
+        <div className="mt-3 rounded-xl border border-white/10 bg-white/5 p-2.5">
+          <p className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">
+            Colunas ({node.columns.length})
+          </p>
+          <ul className="mt-1.5 max-h-40 space-y-1 overflow-y-auto pr-1 text-xs">
+            {node.columns.map((col) => (
+              <li key={col.name} className="flex items-center justify-between gap-2 font-mono" title={col.comment}>
+                <span className="truncate text-slate-200">
+                  {col.isPrimary ? (
+                    <span className="mr-1 text-[10px] text-amber-300">PK</span>
+                  ) : col.isForeign ? (
+                    <span className="mr-1 text-[10px] text-cyan-300">FK</span>
+                  ) : col.isUnique ? (
+                    <span className="mr-1 text-[10px] text-violet-300">UQ</span>
+                  ) : null}
+                  {col.name}
+                </span>
+                <span className="shrink-0 text-[11px] text-slate-400">{col.type}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+
+      {node.indexes && node.indexes.length > 0 ? (
+        <div className="mt-3 rounded-xl border border-white/10 bg-white/5 p-2.5">
+          <p className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">
+            Índices / Unique ({node.indexes.length})
+          </p>
+          <ul className="mt-1.5 max-h-28 space-y-1 overflow-y-auto pr-1 text-xs">
+            {node.indexes.map((idx) => (
+              <li key={idx.name} className="flex items-center justify-between gap-2 font-mono">
+                <span className="truncate text-slate-200" title={idx.name}>
+                  {idx.isUnique ? <span className="mr-1 text-[10px] text-violet-300">UQ</span> : null}
+                  {idx.name}
+                </span>
+                <span className="shrink-0 text-[11px] text-slate-400">({idx.columns.join(", ")})</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+
+      {detailedDiff?.status === "altered" && columnChanges.length > 0 ? (
+        <div className="mt-3 rounded-xl border border-amber-500/30 bg-amber-500/5 p-2.5">
+          <p className="text-[10px] font-semibold uppercase tracking-wider text-amber-300">
+            Mudanças de coluna ({columnChanges.length})
+          </p>
+          <ul className="mt-2 max-h-40 space-y-1.5 overflow-y-auto pr-1 text-xs">
+            {columnChanges.map((change) => (
+              <li key={change.name} className="space-y-0.5">
+                <div className="flex items-center gap-1.5 font-mono">
+                  <span
+                    className={
+                      change.status === "added"
+                        ? "font-bold text-emerald-400"
+                        : change.status === "altered"
+                          ? "font-bold text-amber-400"
+                          : "font-bold text-rose-400"
+                    }
+                  >
+                    {change.status === "added" ? "+" : change.status === "altered" ? "~" : "−"}
+                  </span>
+                  <span
+                    className={
+                      change.status === "removed"
+                        ? "truncate text-rose-300 line-through"
+                        : "truncate text-slate-100"
+                    }
+                  >
+                    {change.name}
+                  </span>
+                </div>
+                {change.changes.length > 0 ? (
+                  <p className="pl-3.5 text-[11px] text-slate-400">{change.changes.join(" · ")}</p>
+                ) : null}
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+    </>
+  );
+
+  if (floatingOverlay) {
+    return (
+      <div className="absolute right-4 top-4 z-30 w-[320px] rounded-2xl border border-slate-700 bg-slate-950/92 p-4 text-sm text-slate-300 shadow-2xl backdrop-blur-md">
+        {content}
+      </div>
+    );
+  }
+
+  return (
+    <Panel
+      position="top-right"
+      className="w-[320px] rounded-2xl border border-slate-700 bg-slate-950/92 p-4 text-sm text-slate-300 shadow-2xl"
+    >
+      {content}
     </Panel>
   );
 }
 
-function EdgePanel({ edge, onClose }: { edge: Edge<Relationship>; onClose: () => void }) {
+function EdgePanel({
+  edge,
+  floatingOverlay = false,
+  onClose,
+}: {
+  edge: Edge<Relationship>;
+  floatingOverlay?: boolean;
+  onClose: () => void;
+}) {
   const data = edge.data;
-  return (
-    <Panel
-      position="bottom-right"
-      className="mb-4 w-[340px] rounded-2xl border border-slate-700 bg-slate-950/92 p-4 text-sm text-slate-300 shadow-2xl"
-    >
+  const content = (
+    <>
       <div className="flex items-start justify-between gap-2">
         <div className="min-w-0">
           <p className="text-[10px] uppercase tracking-[0.26em] text-slate-500">Relacionamento</p>
@@ -468,6 +715,23 @@ function EdgePanel({ edge, onClose }: { edge: Edge<Relationship>; onClose: () =>
           </div>
         </div>
       ) : null}
+    </>
+  );
+
+  if (floatingOverlay) {
+    return (
+      <div className="absolute bottom-4 right-4 z-30 w-[340px] rounded-2xl border border-slate-700 bg-slate-950/92 p-4 text-sm text-slate-300 shadow-2xl backdrop-blur-md">
+        {content}
+      </div>
+    );
+  }
+
+  return (
+    <Panel
+      position="bottom-right"
+      className="mb-4 w-[340px] rounded-2xl border border-slate-700 bg-slate-950/92 p-4 text-sm text-slate-300 shadow-2xl"
+    >
+      {content}
     </Panel>
   );
 }
@@ -476,6 +740,7 @@ type Selection = { type: "edge"; id: string } | { type: "node"; id: string } | n
 
 type Props = {
   diagram: Payload;
+  previousDiagram?: Payload | null;
   diffMap?: Map<string, DiffStatus>;
   height?: number | string;
   /** false = esconde o botão interno de tela cheia (quando o pai controla seu próprio fullscreen). */
@@ -483,20 +748,29 @@ type Props = {
   /** Quando informado, a seleção do canvas sincroniza com o pai (ex: inspector da modelagem). */
   selectedNodeId?: string | null;
   onSelectedNodeChange?: (nodeId: string | null) => void;
+  /** true = não mostra o painel da tabela selecionada (ex: o pai abriu um editor no mesmo lugar). */
+  hideNodePanel?: boolean;
+  /** Quando informado, o painel da tabela ganha o botão "Editar tabela". */
+  onEditNode?: (nodeId: string) => void;
 };
 
 export default function MigrationDiagram({
   diagram,
+  previousDiagram,
   diffMap,
   height = 560,
   showFullscreenButton = true,
   selectedNodeId,
   onSelectedNodeChange,
+  hideNodePanel = false,
+  onEditNode,
 }: Props) {
   const canvasRef = useRef<HTMLDivElement | null>(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const [viewMode, setViewMode] = useState<"er" | "cytoscape">("er");
   const [reactFlowInstance, setReactFlowInstance] = useState<ReactFlowInstance | null>(null);
   const [hiddenScopes, setHiddenScopes] = useState<Set<string>>(new Set());
+  const [scopeMenuOpen, setScopeMenuOpen] = useState(false);
   const [selection, setSelection] = useState<Selection>(null);
   const [manualPositions, setManualPositions] = useState<Map<string, { x: number; y: number }>>(new Map());
   const [prevDiagram, setPrevDiagram] = useState(diagram);
@@ -565,9 +839,14 @@ export default function MigrationDiagram({
     [diagram.edges, visibleNodeIds]
   );
 
+  const detailedDiffMap = useMemo(() => {
+    if (!diffMap || diffMap.size === 0 || previousDiagram === undefined) return undefined;
+    return computeDetailedDiagramDiff(previousDiagram, diagram);
+  }, [diffMap, previousDiagram, diagram]);
+
   const { rfNodes, rfEdges } = useMemo(
-    () => layoutNodes(visibleNodes, visibleEdges, scopes, diffMap),
-    [visibleNodes, visibleEdges, scopes, diffMap]
+    () => layoutNodes(visibleNodes, visibleEdges, scopes, diffMap, detailedDiffMap),
+    [visibleNodes, visibleEdges, scopes, diffMap, detailedDiffMap]
   );
 
   // Conjunto de linhas e tabelas envolvidas na seleção atual: uma única relação (clique numa
@@ -672,15 +951,16 @@ export default function MigrationDiagram({
 
   const focusSelectedNode = useCallback(() => {
     if (!selectedNodeDetail || !reactFlowInstance) return;
-    const positioned = displayNodes.find((n) => n.id === selectedNodeDetail.id);
-    if (!positioned) return;
-    const nodeHeight = NODE_H_BASE + selectedNodeDetail.columns.length * NODE_H_PER_COLUMN;
-    void reactFlowInstance.setCenter(
-      positioned.position.x + NODE_W / 2,
-      positioned.position.y + nodeHeight / 2,
-      { zoom: Math.max(reactFlowInstance.getZoom(), 0.9), duration: 300 }
-    );
-  }, [reactFlowInstance, displayNodes, selectedNodeDetail]);
+    // Com grupos por módulo, `position` do nó é relativa ao grupo pai — centralizar por ela
+    // mirava o lugar errado. O fitView no próprio nó usa a posição absoluta e o tamanho medido.
+    void reactFlowInstance.fitView({
+      nodes: [{ id: selectedNodeDetail.id }],
+      padding: 0.35,
+      minZoom: 0.5,
+      maxZoom: Math.max(reactFlowInstance.getZoom(), 1),
+      duration: 300,
+    });
+  }, [reactFlowInstance, selectedNodeDetail]);
 
   function toggleScope(scopeId: string) {
     setHiddenScopes((prev) => {
@@ -710,30 +990,95 @@ export default function MigrationDiagram({
 
   return (
     <div className={fillParent ? "flex h-full flex-col gap-3" : "space-y-3"}>
-      {scopes.length > 1 ? (
-        <div className="flex flex-wrap gap-2">
-          {scopes.map((scope) => {
-            const active = !hiddenScopes.has(scope.id);
-            const tone = colorFor(scope.id);
-            return (
-              <button
-                key={scope.id}
-                type="button"
-                onClick={() => toggleScope(scope.id)}
-                title={scope.description || scope.label}
-                className="rounded-lg border px-3 py-1.5 text-xs transition"
-                style={
-                  active
-                    ? { borderColor: tone.border, background: tone.fill, color: tone.color }
-                    : { borderColor: "#1e293b", color: "#64748b" }
-                }
-              >
-                {scope.label} <span className="opacity-70">({scope.tables})</span>
-              </button>
-            );
-          })}
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        {scopes.length > 1 ? (
+          <div className="relative">
+            <button
+              type="button"
+              onClick={() => setScopeMenuOpen((v) => !v)}
+              aria-expanded={scopeMenuOpen}
+              title="Escolher quais módulos/escopos aparecem no diagrama"
+              className={`flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs transition ${
+                hiddenScopes.size > 0
+                  ? "border-cyan-400/60 bg-cyan-400/10 text-cyan-200"
+                  : "border-slate-800 text-slate-300 hover:border-slate-600"
+              }`}
+            >
+              <Filter className="h-3.5 w-3.5" />
+              Módulos ({scopes.length - scopes.filter((s) => hiddenScopes.has(s.id)).length}/{scopes.length})
+              <ChevronDown className="h-3.5 w-3.5 opacity-70" />
+            </button>
+            {scopeMenuOpen ? (
+              <>
+                {/* Camada invisível: clicar fora fecha o menu. */}
+                <div className="fixed inset-0 z-40" onClick={() => setScopeMenuOpen(false)} />
+                <div className="absolute left-0 top-full z-50 mt-1 w-[280px] rounded-xl border border-slate-700 bg-slate-950 p-2 shadow-2xl">
+                  <div className="mb-1.5 flex items-center justify-between px-1 text-[11px]">
+                    <button type="button" onClick={() => setHiddenScopes(new Set())} className="text-cyan-300 hover:underline">
+                      Mostrar todos
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setHiddenScopes(new Set(scopes.map((s) => s.id)))}
+                      className="text-slate-400 hover:underline"
+                    >
+                      Ocultar todos
+                    </button>
+                  </div>
+                  <ul className="max-h-72 space-y-0.5 overflow-y-auto">
+                    {scopes.map((scope) => {
+                      const active = !hiddenScopes.has(scope.id);
+                      const tone = colorFor(scope.id);
+                      return (
+                        <li key={scope.id}>
+                          <label
+                            title={scope.description || scope.label}
+                            className="flex cursor-pointer items-center gap-2 rounded-lg px-2 py-1.5 text-xs text-slate-200 hover:bg-slate-900"
+                          >
+                            <input type="checkbox" checked={active} onChange={() => toggleScope(scope.id)} />
+                            <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: tone.color }} />
+                            <span className="min-w-0 flex-1 truncate">{scope.label}</span>
+                            <span className="text-slate-500">{scope.tables}</span>
+                          </label>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                </div>
+              </>
+            ) : null}
+          </div>
+        ) : (
+          <div />
+        )}
+
+        <div className="inline-flex items-center rounded-xl border border-slate-800 bg-slate-950/90 p-1 text-xs">
+          <button
+            type="button"
+            onClick={() => setViewMode("er")}
+            className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1 font-medium transition ${
+              viewMode === "er"
+                ? "bg-cyan-500/20 text-cyan-200 shadow-sm ring-1 ring-cyan-400/50"
+                : "text-slate-400 hover:text-slate-200"
+            }`}
+          >
+            <LayoutGrid className="h-3.5 w-3.5" />
+            Cartões ER
+          </button>
+          <button
+            type="button"
+            onClick={() => setViewMode("cytoscape")}
+            className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1 font-medium transition ${
+              viewMode === "cytoscape"
+                ? "bg-cyan-500/20 text-cyan-200 shadow-sm ring-1 ring-cyan-400/50"
+                : "text-slate-400 hover:text-slate-200"
+            }`}
+          >
+            <Network className="h-3.5 w-3.5" />
+            Grafo (Cytoscape)
+          </button>
         </div>
-      ) : null}
+      </div>
 
       {visibleNodes.length === 0 ? (
         <div
@@ -747,62 +1092,119 @@ export default function MigrationDiagram({
       ) : (
         <div
           ref={canvasRef}
-          className={`overflow-hidden border-2 border-slate-800 bg-slate-950 shadow-[0_20px_60px_-25px_rgba(8,145,178,0.35)] ${
+          className={`relative overflow-hidden border-2 border-slate-800 bg-slate-950 shadow-[0_20px_60px_-25px_rgba(8,145,178,0.35)] ${
             isFullscreen ? "h-screen w-screen" : fillParent ? "min-h-0 flex-1 rounded-2xl" : "rounded-2xl"
           }`}
           style={isFullscreen ? undefined : fillParent ? undefined : { height }}
         >
-          <ReactFlow
-            nodes={displayNodes}
-            edges={displayEdges}
-            nodeTypes={nodeTypes}
-            onInit={setReactFlowInstance}
-            onNodeClick={onNodeClick}
-            onNodeDragStop={onNodeDragStop}
-            onEdgeClick={onEdgeClick}
-            onPaneClick={onPaneClick}
-            fitView
-            fitViewOptions={{ padding: 0.2 }}
-            minZoom={0.2}
-            maxZoom={2}
-            onlyRenderVisibleElements
-            proOptions={{ hideAttribution: true }}
-          >
-            <Background variant={BackgroundVariant.Dots} gap={20} size={1} color="#1e293b" />
-            <Controls className="!bg-slate-900 !border-slate-700" />
-            <MiniMap
-              className="!bg-slate-900"
-              nodeColor={(n) => {
-                if (n.type === "group") return (n.data as GroupNodeData).tone.color;
-                const status = (n.data as NodeData)?.status;
-                if (status === "added") return "#34d399";
-                if (status === "altered") return "#fbbf24";
-                if (status === "removed") return "#fb7185";
-                return (n.data as NodeData)?.tone?.color ?? "#334155";
-              }}
-            />
-            {showFullscreenButton ? (
-              <Panel position="top-left">
+          {viewMode === "er" ? (
+            <ReactFlow
+              nodes={displayNodes}
+              edges={displayEdges}
+              nodeTypes={nodeTypes}
+              onInit={setReactFlowInstance}
+              onNodeClick={onNodeClick}
+              onNodeDragStop={onNodeDragStop}
+              onEdgeClick={onEdgeClick}
+              onPaneClick={onPaneClick}
+              fitView
+              fitViewOptions={{ padding: 0.2 }}
+              minZoom={0.2}
+              maxZoom={2}
+              onlyRenderVisibleElements
+              proOptions={{ hideAttribution: true }}
+            >
+              <Background variant={BackgroundVariant.Dots} gap={20} size={1} color="#1e293b" />
+              <Controls className="!bg-slate-900 !border-slate-700" />
+              <MiniMap
+                className="!bg-slate-900"
+                nodeColor={(n) => {
+                  if (n.type === "group") return (n.data as GroupNodeData).tone.color;
+                  const status = (n.data as NodeData)?.status;
+                  if (status === "added") return "#34d399";
+                  if (status === "altered") return "#fbbf24";
+                  if (status === "removed") return "#fb7185";
+                  return (n.data as NodeData)?.tone?.color ?? "#334155";
+                }}
+              />
+              {showFullscreenButton ? (
+                <Panel position="top-left">
+                  <button
+                    type="button"
+                    onClick={() => void toggleFullscreen()}
+                    title={isFullscreen ? "Sair da tela cheia" : "Tela cheia"}
+                    className="flex h-8 w-8 items-center justify-center rounded-lg border border-slate-700 bg-slate-900/90 text-slate-300 transition hover:border-cyan-400 hover:text-cyan-300"
+                  >
+                    {isFullscreen ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
+                  </button>
+                </Panel>
+              ) : null}
+              {selectedNodeDetail && !hideNodePanel ? (
+                <NodePanel
+                  node={selectedNodeDetail}
+                  relationCount={highlighted && selection?.type === "node" ? highlighted.edgeIds.size : 0}
+                  detailedDiff={detailedDiffMap?.get(selectedNodeDetail.id)}
+                  onFocus={focusSelectedNode}
+                  onEdit={onEditNode ? () => onEditNode(selectedNodeDetail.id) : undefined}
+                  onClose={() => setSelection(null)}
+                />
+              ) : null}
+              {selectedEdgeDetail ? <EdgePanel edge={selectedEdgeDetail} onClose={() => setSelection(null)} /> : null}
+            </ReactFlow>
+          ) : (
+            <>
+              <CytoscapeDiagram
+                nodes={visibleNodes}
+                edges={visibleEdges}
+                scopes={scopes}
+                diffMap={diffMap}
+                selectedNodeId={selection?.type === "node" ? selection.id : null}
+                selectedEdgeId={selection?.type === "edge" ? selection.id : null}
+                onSelectNode={(nodeId) => {
+                  setSelection(nodeId ? { type: "node", id: nodeId } : null);
+                  onSelectedNodeChange?.(nodeId);
+                }}
+                onSelectEdge={(edgeId) => {
+                  setSelection(edgeId ? { type: "edge", id: edgeId } : null);
+                }}
+              />
+              {showFullscreenButton ? (
                 <button
                   type="button"
                   onClick={() => void toggleFullscreen()}
                   title={isFullscreen ? "Sair da tela cheia" : "Tela cheia"}
-                  className="flex h-8 w-8 items-center justify-center rounded-lg border border-slate-700 bg-slate-900/90 text-slate-300 transition hover:border-cyan-400 hover:text-cyan-300"
+                  className="absolute bottom-3 right-3 z-20 flex h-8 w-8 items-center justify-center rounded-lg border border-slate-700 bg-slate-900/90 text-slate-300 transition hover:border-cyan-400 hover:text-cyan-300"
                 >
                   {isFullscreen ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
                 </button>
-              </Panel>
-            ) : null}
-            {selectedNodeDetail ? (
-              <NodePanel
-                node={selectedNodeDetail}
-                relationCount={highlighted && selection?.type === "node" ? highlighted.edgeIds.size : 0}
-                onFocus={focusSelectedNode}
-                onClose={() => setSelection(null)}
-              />
-            ) : null}
-            {selectedEdgeDetail ? <EdgePanel edge={selectedEdgeDetail} onClose={() => setSelection(null)} /> : null}
-          </ReactFlow>
+              ) : null}
+              {selectedNodeDetail && !hideNodePanel ? (
+                <NodePanel
+                  node={selectedNodeDetail}
+                  onEdit={onEditNode ? () => onEditNode(selectedNodeDetail.id) : undefined}
+                  relationCount={
+                    visibleEdges.filter(
+                      (e) => e.source === selectedNodeDetail.id || e.target === selectedNodeDetail.id
+                    ).length
+                  }
+                  detailedDiff={detailedDiffMap?.get(selectedNodeDetail.id)}
+                  showColumnList
+                  floatingOverlay
+                  onClose={() => {
+                    setSelection(null);
+                    onSelectedNodeChange?.(null);
+                  }}
+                />
+              ) : null}
+              {selectedEdgeDetail ? (
+                <EdgePanel
+                  edge={selectedEdgeDetail}
+                  floatingOverlay
+                  onClose={() => setSelection(null)}
+                />
+              ) : null}
+            </>
+          )}
         </div>
       )}
     </div>

@@ -4,10 +4,19 @@ import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import MigrationDiagram, { type DiffStatus, type MigrationDiagramPayload } from "@/components/migrations/MigrationDiagram";
+import MigrationFkLinkerPanel from "@/components/migrations/MigrationFkLinkerPanel";
 import MigrationSummaryPanel from "@/components/migrations/MigrationSummaryPanel";
 import MigrationTableList from "@/components/migrations/MigrationTableList";
 import MigrationTimeline from "@/components/migrations/MigrationTimeline";
-import { computeDiagramDiff } from "@/lib/diagram-diff";
+import {
+  computeDetailedDiagramDiff,
+  computeDiagramDiff,
+  type TableDetailedDiff,
+} from "@/lib/diagram-diff";
+import { lintDiagram } from "@/lib/schema-linter";
+import type { AddFkInput } from "@/lib/services/migration-fks";
+import type { SchemaDriftReport } from "@/lib/services/schema-drift";
+import { applySchemaOps } from "@/lib/services/schema-ops";
 import type { DiagramResponse } from "@/lib/types/diagram";
 import type {
   MigrationAppendResultDTO,
@@ -55,6 +64,20 @@ export default function MigrationsWorkbench({ connectionId }: Props) {
 
   const [reprocessing, setReprocessing] = useState(false);
   const [reprocessError, setReprocessError] = useState<string | null>(null);
+
+  const [lintOpen, setLintOpen] = useState(false);
+  const [driftOpen, setDriftOpen] = useState(false);
+  const [fkLinkerOpen, setFkLinkerOpen] = useState(false);
+  const [previewFks, setPreviewFks] = useState<AddFkInput[]>([]);
+  const [dbConnections, setDbConnections] = useState<Array<{ id: string; name: string; provider: string }>>([]);
+  const [driftTargetId, setDriftTargetId] = useState<string>(connectionId);
+  const [checkingDrift, setCheckingDrift] = useState(false);
+  const [driftError, setDriftError] = useState<string | null>(null);
+  const [driftResult, setDriftResult] = useState<{
+    targetConnectionName: string;
+    targetProvider: string;
+    report: SchemaDriftReport;
+  } | null>(null);
 
   const refreshList = useCallback(async () => {
     setLoadingList(true);
@@ -175,6 +198,11 @@ export default function MigrationsWorkbench({ connectionId }: Props) {
     return computeDiagramDiff(previousDiagram, currentSnapshot.diagram) as Map<string, DiffStatus>;
   }, [diffEnabled, currentSnapshot, previousDiagram]);
 
+  const detailedDiffMap = useMemo<Map<string, TableDetailedDiff>>(() => {
+    if (!diffEnabled || !currentSnapshot || !previousDiagram) return new Map();
+    return computeDetailedDiagramDiff(previousDiagram, currentSnapshot.diagram);
+  }, [diffEnabled, currentSnapshot, previousDiagram]);
+
   const handleFiles = useCallback((files: FileList | File[]) => {
     const arr = Array.from(files).filter((f) => /\.(sql|zip)$/i.test(f.name));
     setUploadFiles(arr);
@@ -290,11 +318,84 @@ export default function MigrationsWorkbench({ connectionId }: Props) {
   // Ao trocar de snapshot/package, a tabela em foco deixa de fazer sentido.
   useEffect(() => {
     setSelectedTableId(null);
+    setDriftResult(null);
+    setDriftError(null);
+    setPreviewFks([]);
   }, [currentOrder, selectedPackageId]);
 
+  useEffect(() => {
+    if (!driftOpen) return;
+    let active = true;
+    fetch("/api/connections", { cache: "no-store" })
+      .then((res) => (res.ok ? res.json() : []))
+      .then((list: Array<{ id: string; name: string; provider: string }>) => {
+        if (!active || !Array.isArray(list)) return;
+        const liveDbs = list.filter((c) => c.provider !== "MIGRATIONS");
+        setDbConnections(liveDbs);
+        if (liveDbs.some((c) => c.id === connectionId)) {
+          setDriftTargetId(connectionId);
+        } else if (liveDbs.length > 0) {
+          setDriftTargetId((prev) => (liveDbs.some((c) => c.id === prev) ? prev : liveDbs[0].id));
+        }
+      })
+      .catch(() => undefined);
+    return () => {
+      active = false;
+    };
+  }, [driftOpen, connectionId]);
+
+  const checkDrift = useCallback(async () => {
+    if (!selectedPackageId || !driftTargetId || checkingDrift) return;
+    setCheckingDrift(true);
+    setDriftError(null);
+    try {
+      const params = new URLSearchParams({ targetConnectionId: driftTargetId });
+      if (currentOrder !== null) params.set("order", String(currentOrder));
+      const res = await fetch(
+        `/api/migrations/${connectionId}/${selectedPackageId}/drift?${params.toString()}`,
+        { cache: "no-store" }
+      );
+      const body = (await res.json().catch(() => null)) as {
+        error?: string;
+        targetConnectionName?: string;
+        targetProvider?: string;
+        report?: SchemaDriftReport;
+      } | null;
+      if (!res.ok || !body?.report) {
+        throw new Error(body?.error ?? "Falha ao verificar schema drift");
+      }
+      setDriftResult({
+        targetConnectionName: body.targetConnectionName ?? driftTargetId,
+        targetProvider: body.targetProvider ?? "",
+        report: body.report,
+      });
+    } catch (err) {
+      setDriftError(err instanceof Error ? err.message : "Erro ao verificar schema drift");
+    } finally {
+      setCheckingDrift(false);
+    }
+  }, [connectionId, selectedPackageId, driftTargetId, currentOrder, checkingDrift]);
+
   const activeDiagram: MigrationDiagramPayload | null = currentSnapshot?.diagram ?? finalDiagram;
+  const effectiveDiagram: MigrationDiagramPayload | null = useMemo(() => {
+    if (!activeDiagram || previewFks.length === 0) return activeDiagram;
+    const ops = previewFks.map((fk) => ({
+      op: "addForeignKey" as const,
+      table: fk.table,
+      column: fk.column,
+      referencesTable: fk.referencesTable,
+      referencesColumn: fk.referencesColumn,
+      ...(fk.onDelete ? { onDelete: fk.onDelete } : {}),
+      ...(fk.onUpdate ? { onUpdate: fk.onUpdate } : {}),
+    }));
+    return applySchemaOps(activeDiagram as unknown as DiagramResponse, ops).next as unknown as MigrationDiagramPayload;
+  }, [activeDiagram, previewFks]);
   const activeDiffMap = currentSnapshot ? computedDiffMap : undefined;
   const totalWarnings = currentSnapshot?.warnings.length ?? 0;
+  const lintIssues = useMemo(
+    () => (effectiveDiagram ? lintDiagram(effectiveDiagram) : []),
+    [effectiveDiagram]
+  );
 
   const diffSummary = useMemo(() => {
     const added: string[] = [];
@@ -464,6 +565,42 @@ export default function MigrationsWorkbench({ connectionId }: Props) {
                   </label>
                   <button
                     type="button"
+                    onClick={() => setDriftOpen((v) => !v)}
+                    title="Comparar o schema desta migration com um banco de dados conectado ao vivo"
+                    className="rounded-lg border border-[var(--color-border-subtle)] px-3 py-1.5 text-xs text-[var(--color-text-secondary)] transition hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]"
+                  >
+                    Verificar Schema Drift
+                  </button>
+                  {activeDiagram && activeDiagram.nodes.length > 0 ? (
+                    <>
+                      <button
+                        type="button"
+                        onClick={() => setFkLinkerOpen((v) => !v)}
+                        title="Ligar Foreign Keys manualmente ou pedir sugestões da IA/heurística diretamente nesta migration"
+                        className={`rounded-lg border px-3 py-1.5 text-xs font-medium transition ${
+                          fkLinkerOpen || previewFks.length > 0
+                            ? "border-[var(--color-accent)] bg-[var(--color-accent)]/15 text-[var(--color-accent)]"
+                            : "border-[var(--color-border-subtle)] text-[var(--color-text-secondary)] hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]"
+                        }`}
+                      >
+                        Ligar / Sugerir FKs{previewFks.length > 0 ? ` (+${previewFks.length})` : ""}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setLintOpen((v) => !v)}
+                        title="Analisar qualidade estrutural do schema (PKs, FKs, tipos e nomenclatura)"
+                        className={`rounded-lg border px-3 py-1.5 text-xs transition ${
+                          lintIssues.length > 0
+                            ? "border-amber-500/50 bg-amber-500/10 text-amber-300 hover:border-amber-400"
+                            : "border-[var(--color-border-subtle)] text-emerald-400 hover:border-emerald-400"
+                        }`}
+                      >
+                        {lintIssues.length > 0 ? `Linter (${lintIssues.length})` : "Schema OK"}
+                      </button>
+                    </>
+                  ) : null}
+                  <button
+                    type="button"
                     onClick={() => void reprocessPackage()}
                     disabled={reprocessing}
                     title="Relê os arquivos gravados e regenera todos os snapshots com o parser atual"
@@ -491,6 +628,197 @@ export default function MigrationsWorkbench({ connectionId }: Props) {
                 </div>
               ) : null}
               {reprocessError ? <p className="text-xs text-red-500">{reprocessError}</p> : null}
+
+              {driftOpen ? (
+                <div className="space-y-3 rounded-xl border border-[var(--color-border-subtle)] bg-[var(--color-bg-layer-1)]/60 p-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <p className="text-xs font-semibold uppercase tracking-[0.2em] text-[var(--color-accent)]">
+                      Schema Drift (Migrations vs. Banco ao vivo)
+                    </p>
+                    <div className="flex flex-wrap items-center gap-2">
+                      {dbConnections.length === 0 ? (
+                        <span className="text-xs text-[var(--color-text-muted)]">
+                          Nenhuma conexão MySQL/PostgreSQL cadastrada para comparar.
+                        </span>
+                      ) : (
+                        <>
+                          <select
+                            value={driftTargetId}
+                            onChange={(e) => setDriftTargetId(e.target.value)}
+                            className="rounded-lg border border-[var(--color-border-subtle)] bg-[var(--color-bg-layer-2)] px-2.5 py-1.5 text-xs text-[var(--color-text-primary)] focus:border-[var(--color-accent)] focus:outline-none"
+                          >
+                            {dbConnections.map((conn) => (
+                              <option key={conn.id} value={conn.id}>
+                                {conn.name} ({conn.provider})
+                              </option>
+                            ))}
+                          </select>
+                          <button
+                            type="button"
+                            onClick={() => void checkDrift()}
+                            disabled={checkingDrift || !driftTargetId}
+                            className="rounded-lg bg-[var(--color-accent)] px-3 py-1.5 text-xs font-semibold text-[var(--color-text-inverse)] transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+                          >
+                            {checkingDrift ? "Comparando..." : "Comparar agora"}
+                          </button>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                  {driftError ? <p className="text-xs text-red-500">{driftError}</p> : null}
+                  {driftResult ? (
+                    <div className="space-y-2 text-xs">
+                      <div className="flex items-center gap-2">
+                        <span
+                          className={`inline-block h-2 w-2 rounded-full ${
+                            driftResult.report.inSync ? "bg-emerald-400" : "bg-amber-400"
+                          }`}
+                        />
+                        <span className="font-medium text-[var(--color-text-primary)]">
+                          {driftResult.report.inSync
+                            ? `Banco "${driftResult.targetConnectionName}" está 100% sincronizado com o snapshot.`
+                            : `Divergências detectadas em "${driftResult.targetConnectionName}":`}
+                        </span>
+                      </div>
+                      {!driftResult.report.inSync ? (
+                        <div className="grid gap-3 sm:grid-cols-3">
+                          <div className="space-y-1">
+                            <p className="text-[11px] font-medium text-rose-300">
+                              Faltando no banco ({driftResult.report.missingInActual.length})
+                            </p>
+                            {driftResult.report.missingInActual.length === 0 ? (
+                              <p className="text-[var(--color-text-muted)]">—</p>
+                            ) : (
+                              <ul className="space-y-0.5 font-mono text-rose-200">
+                                {driftResult.report.missingInActual.map((t) => (
+                                  <li key={t}>{t}</li>
+                                ))}
+                              </ul>
+                            )}
+                          </div>
+                          <div className="space-y-1">
+                            <p className="text-[11px] font-medium text-amber-300">
+                              Tabelas com drift ({driftResult.report.driftedTables.length})
+                            </p>
+                            {driftResult.report.driftedTables.length === 0 ? (
+                              <p className="text-[var(--color-text-muted)]">—</p>
+                            ) : (
+                              <ul className="space-y-1">
+                                {driftResult.report.driftedTables.map((item) => (
+                                  <li key={item.tableId} className="space-y-0.5">
+                                    <div className="font-mono text-amber-200">{item.tableId}</div>
+                                    <ul className="pl-2.5 font-mono text-[11px] text-[var(--color-text-muted)]">
+                                      {item.columns.map((c) => (
+                                        <li key={c.name}>
+                                          • {c.name}: {c.changes.join(", ")}
+                                        </li>
+                                      ))}
+                                    </ul>
+                                  </li>
+                                ))}
+                              </ul>
+                            )}
+                          </div>
+                          <div className="space-y-1">
+                            <p className="text-[11px] font-medium text-cyan-300">
+                              Extras no banco ({driftResult.report.extraInActual.length})
+                            </p>
+                            {driftResult.report.extraInActual.length === 0 ? (
+                              <p className="text-[var(--color-text-muted)]">—</p>
+                            ) : (
+                              <ul className="space-y-0.5 font-mono text-cyan-200">
+                                {driftResult.report.extraInActual.map((t) => (
+                                  <li key={t}>{t}</li>
+                                ))}
+                              </ul>
+                            )}
+                          </div>
+                        </div>
+                      ) : null}
+                      {!driftResult.report.inSync && driftResult.report.reconcileSql ? (
+                        <details className="mt-2 rounded-lg border border-[var(--color-border-subtle)] bg-[var(--color-bg-layer-2)]/70 p-2.5">
+                          <summary className="cursor-pointer text-[11px] font-semibold text-[var(--color-accent)]">
+                            Ver SQL de reconciliação sugerido
+                          </summary>
+                          <div className="mt-2 space-y-2">
+                            <pre className="max-h-48 overflow-auto rounded-md bg-slate-950 p-2.5 font-mono text-[11px] text-slate-200">
+                              {driftResult.report.reconcileSql}
+                            </pre>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                void navigator.clipboard?.writeText(driftResult.report.reconcileSql ?? "");
+                              }}
+                              className="rounded-md border border-[var(--color-border-subtle)] px-2.5 py-1 text-[11px] text-[var(--color-text-secondary)] transition hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]"
+                            >
+                              Copiar SQL
+                            </button>
+                          </div>
+                        </details>
+                      ) : null}
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
+
+              {lintOpen && activeDiagram ? (
+                <div className="space-y-2 rounded-xl border border-[var(--color-border-subtle)] bg-[var(--color-bg-layer-1)]/60 p-3">
+                  <p className="text-xs font-semibold uppercase tracking-[0.2em] text-[var(--color-accent)]">
+                    Diagnóstico de Qualidade do Schema ({lintIssues.length})
+                  </p>
+                  {lintIssues.length === 0 ? (
+                    <p className="text-xs text-emerald-400">
+                      Nenhum problema estrutural detectado neste snapshot.
+                    </p>
+                  ) : (
+                    <ul className="max-h-44 space-y-1.5 overflow-y-auto pr-1 text-xs">
+                      {lintIssues.map((issue) => (
+                        <li
+                          key={issue.id}
+                          className="rounded-lg border border-[var(--color-border-subtle)] bg-[var(--color-bg-layer-2)]/60 px-2.5 py-1.5"
+                        >
+                          <div className="flex items-center gap-1.5">
+                            <span
+                              className={`inline-block h-2 w-2 shrink-0 rounded-full ${
+                                issue.severity === "error"
+                                  ? "bg-rose-400"
+                                  : issue.severity === "warning"
+                                    ? "bg-amber-400"
+                                    : "bg-cyan-400"
+                              }`}
+                            />
+                            <button
+                              type="button"
+                              onClick={() => setSelectedTableId(issue.tableId)}
+                              className="truncate font-semibold text-[var(--color-text-primary)] hover:underline"
+                            >
+                              {issue.title}
+                            </button>
+                          </div>
+                          <p className="mt-0.5 pl-3.5 text-[11px] text-[var(--color-text-muted)]">
+                            {issue.description}
+                          </p>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              ) : null}
+
+              {fkLinkerOpen && activeDiagram && selectedPackageId ? (
+                <MigrationFkLinkerPanel
+                  connectionId={connectionId}
+                  packageId={selectedPackageId}
+                  currentOrder={currentOrder ?? detail.fileCount}
+                  fileCount={detail.fileCount}
+                  diagram={activeDiagram as unknown as DiagramResponse}
+                  onPreviewFksChange={setPreviewFks}
+                  onPackageUpdated={async () => {
+                    await loadDetail(selectedPackageId);
+                    await refreshList();
+                  }}
+                />
+              ) : null}
 
               <div className="flex flex-wrap items-center gap-3 rounded-xl border border-dashed border-[var(--color-border-subtle)] p-3">
                 <input
@@ -581,7 +909,12 @@ export default function MigrationsWorkbench({ connectionId }: Props) {
                       ) : (
                         <div className="mt-2 grid gap-3 sm:grid-cols-3">
                           <DiffColumn label="Adicionadas" color="emerald" tables={diffSummary.added} />
-                          <DiffColumn label="Alteradas" color="amber" tables={diffSummary.altered} />
+                          <DiffColumn
+                            label="Alteradas"
+                            color="amber"
+                            tables={diffSummary.altered}
+                            detailedDiffMap={detailedDiffMap}
+                          />
                           <DiffColumn label="Removidas" color="rose" tables={diffSummary.removed} />
                         </div>
                       )}
@@ -620,24 +953,30 @@ export default function MigrationsWorkbench({ connectionId }: Props) {
                   <p className="text-xs font-semibold uppercase tracking-[0.2em] text-[var(--color-accent)]">
                     Diagrama do schema
                   </p>
-                  {activeDiagram ? (
+                  {effectiveDiagram ? (
                     <p className="text-xs text-[var(--color-text-muted)]">
-                      {activeDiagram.nodes.length} tabelas · {activeDiagram.edges.length} relações
+                      {effectiveDiagram.nodes.length} tabelas · {effectiveDiagram.edges.length} relações
+                      {previewFks.length > 0 ? (
+                        <span className="ml-1.5 rounded bg-emerald-500/15 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-300">
+                          +{previewFks.length} FK(s) em preview
+                        </span>
+                      ) : null}
                     </p>
                   ) : null}
                 </div>
                 {/* Altura fixa evita colapso de layout (e o salto de scroll da página) enquanto o próximo snapshot carrega. */}
-                {activeDiagram ? (
+                {effectiveDiagram ? (
                   <div className="grid gap-3 lg:grid-cols-[300px_minmax(0,1fr)]">
                     <MigrationTableList
-                      diagram={activeDiagram}
+                      diagram={effectiveDiagram}
                       diffMap={activeDiffMap}
                       selectedTableId={selectedTableId}
                       onSelect={setSelectedTableId}
                     />
                     <div className="relative">
                       <MigrationDiagram
-                        diagram={activeDiagram}
+                        diagram={effectiveDiagram}
+                        previousDiagram={diffEnabled ? previousDiagram : undefined}
                         diffMap={activeDiffMap}
                         height={640}
                         selectedNodeId={selectedTableId}
@@ -689,10 +1028,12 @@ function DiffColumn({
   label,
   color,
   tables,
+  detailedDiffMap,
 }: {
   label: string;
   color: keyof typeof DIFF_COLUMN_STYLES;
   tables: string[];
+  detailedDiffMap?: Map<string, TableDetailedDiff>;
 }) {
   const styles = DIFF_COLUMN_STYLES[color];
   return (
@@ -704,12 +1045,39 @@ function DiffColumn({
       {tables.length === 0 ? (
         <p className="text-xs text-[var(--color-text-muted)]">—</p>
       ) : (
-        <ul className="space-y-0.5">
-          {tables.map((table) => (
-            <li key={table} className={`truncate font-mono text-xs ${styles.text}`}>
-              {table}
-            </li>
-          ))}
+        <ul className="space-y-1">
+          {tables.map((table) => {
+            const detail = detailedDiffMap?.get(table);
+            const colChanges = detail ? Array.from(detail.columns.values()) : [];
+            return (
+              <li key={table} className="space-y-0.5">
+                <div className={`truncate font-mono text-xs ${styles.text}`}>{table}</div>
+                {colChanges.length > 0 ? (
+                  <ul className="pl-2.5 text-[11px] text-[var(--color-text-muted)]">
+                    {colChanges.map((col) => (
+                      <li key={col.name} className="truncate font-mono">
+                        <span
+                          className={
+                            col.status === "added"
+                              ? "text-emerald-400"
+                              : col.status === "altered"
+                                ? "text-amber-400"
+                                : "text-rose-400"
+                          }
+                        >
+                          {col.status === "added" ? "+" : col.status === "altered" ? "~" : "−"}
+                        </span>{" "}
+                        <span className="text-[var(--color-text-secondary)]">{col.name}</span>
+                        {col.changes.length > 0 ? (
+                          <span className="text-[var(--color-text-muted)]"> ({col.changes.join(", ")})</span>
+                        ) : null}
+                      </li>
+                    ))}
+                  </ul>
+                ) : null}
+              </li>
+            );
+          })}
         </ul>
       )}
     </div>

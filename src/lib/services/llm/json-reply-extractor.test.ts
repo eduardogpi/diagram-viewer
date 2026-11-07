@@ -53,4 +53,18 @@ describe("createJsonReplyExtractor", () => {
     expect(extractor.getReply()).toBe("Resposta com markdown");
     expect(deltas).toBe("Resposta com markdown");
   });
+
+  it("ignora chaves ou valores 'reply' aninhados dentro de operations quando operations vem antes", () => {
+    let deltas = "";
+    const extractor = createJsonReplyExtractor((d) => {
+      deltas += d;
+    });
+
+    extractor.feed(
+      '{"operations": [{"op": "createTable", "table": "reply", "columns": [{"name": "reply", "type": "TEXT"}]}], "reply": "Resposta real no nível raiz"}'
+    );
+    expect(extractor.getReply()).toBe("Resposta real no nível raiz");
+    expect(deltas).toBe("Resposta real no nível raiz");
+    expect(extractor.isReplyCompleted()).toBe(true);
+  });
 });

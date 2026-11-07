@@ -108,7 +108,7 @@ export function summarizeOperations(operations: SchemaOp[]): string {
     switch (op.op) {
       case "createTable": {
         const columns = op.columns.map((c) => `${c.name} ${c.type}`).join(", ");
-        return `criou a tabela ${op.table}${op.scope ? ` (escopo ${op.scope})` : ""} com as colunas ${columns}`;
+        return `criou a tabela ${op.table}${op.scope ? ` (escopo ${op.scope})` : ""} com as colunas ${columns}${op.comment ? ` — propósito: ${op.comment}` : ""}`;
       }
       case "addColumn":
         return `adicionou a coluna ${op.newColumn.name} (${op.newColumn.type}) em ${op.table}`;
@@ -132,6 +132,14 @@ export function summarizeOperations(operations: SchemaOp[]): string {
         return `removeu a tabela ${op.table}`;
       case "renameTable":
         return `renomeou a tabela ${op.table} para ${op.newName}`;
+      case "createIndex":
+        return `criou o índice ${op.isUnique ? "UNIQUE " : ""}${op.name ?? op.columns.join("_")} em ${op.table} (${op.columns.join(", ")})`;
+      case "dropIndex":
+        return `removeu o índice ${op.name} de ${op.table}`;
+      case "setComment":
+        return op.comment.trim()
+          ? `documentou ${op.column ? `a coluna ${op.table}.${op.column}` : `a tabela ${op.table}`}: ${op.comment.trim()}`
+          : `removeu o comentário de ${op.column ? `${op.table}.${op.column}` : op.table}`;
     }
   });
 

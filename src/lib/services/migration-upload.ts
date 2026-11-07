@@ -61,9 +61,9 @@ export async function readMigrationFilesFromFormData(formData: FormData): Promis
       let extracted: MigrationFileInput[];
       try {
         extracted = await extractZipToMigrationInputs(zipBuffer, {
-          maxFiles: MAX_FILES,
+          maxFiles: Math.max(0, MAX_FILES - inputs.length),
           maxFileSize: MAX_FILE_SIZE,
-          maxTotalSize: MAX_TOTAL_SIZE,
+          maxTotalSize: Math.max(0, MAX_TOTAL_SIZE - totalSize),
         });
       } catch (err) {
         const message = err instanceof Error ? err.message : "Falha ao extrair zip";
@@ -75,7 +75,7 @@ export async function readMigrationFilesFromFormData(formData: FormData): Promis
       }
 
       for (const file of extracted) {
-        push(file, file.content.length);
+        push(file, Buffer.byteLength(file.content, "utf8"));
       }
       fileIndex += 1;
       continue;

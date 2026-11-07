@@ -15,7 +15,8 @@ export type MigrationTableListDiagram = {
     label: string;
     scope: string;
     schema: string;
-    columns: Array<{ name: string }>;
+    comment?: string;
+    columns: Array<{ name: string; comment?: string }>;
   }>;
   edges: Array<{ id: string; source: string; target: string }>;
   scopes: Array<{ id: string; label: string; tables: number }>;
@@ -59,8 +60,12 @@ export default function MigrationTableList({ diagram, diffMap, selectedTableId, 
     return diagram.nodes
       .map((node) => {
         const status = diffMap?.get(node.id);
+        // A busca também olha a documentação: achar "cancelamento" deve trazer a coluna cujo
+        // comentário fala disso, mesmo que o nome seja "st_pedido".
         const matchedColumns = needle
-          ? node.columns.filter((c) => c.name.toLowerCase().includes(needle)).map((c) => c.name)
+          ? node.columns
+              .filter((c) => c.name.toLowerCase().includes(needle) || c.comment?.toLowerCase().includes(needle))
+              .map((c) => c.name)
           : [];
         return {
           node,
@@ -77,6 +82,7 @@ export default function MigrationTableList({ diagram, diffMap, selectedTableId, 
         return (
           row.node.label.toLowerCase().includes(needle) ||
           row.node.id.toLowerCase().includes(needle) ||
+          Boolean(row.node.comment?.toLowerCase().includes(needle)) ||
           row.matchedColumns.length > 0
         );
       })
@@ -115,8 +121,8 @@ export default function MigrationTableList({ diagram, diffMap, selectedTableId, 
           <input
             value={query}
             onChange={(event) => setQuery(event.target.value)}
-            placeholder="Buscar tabela ou coluna..."
-            aria-label="Buscar tabela ou coluna"
+            placeholder="Buscar tabela, coluna ou comentário..."
+            aria-label="Buscar tabela, coluna ou comentário"
             className="w-full rounded-lg border border-[var(--color-border-subtle)] bg-[var(--color-bg-layer-2)] py-1.5 pl-7 pr-7 text-xs text-[var(--color-text-primary)] focus:border-[var(--color-accent)] focus:outline-none"
           />
           {query ? (
@@ -179,7 +185,9 @@ export default function MigrationTableList({ diagram, diffMap, selectedTableId, 
                       <button
                         type="button"
                         onClick={() => onSelect(active ? null : row.node.id)}
-                        title={`${row.node.id}${row.node.schema ? ` (${row.node.schema})` : ""}`}
+                        title={`${row.node.id}${row.node.schema ? ` (${row.node.schema})` : ""}${
+                          row.node.comment ? `\n${row.node.comment}` : ""
+                        }`}
                         className={`flex w-full items-center gap-2 rounded-lg border px-2 py-1.5 text-left transition ${
                           active
                             ? "border-[var(--color-accent)] bg-[color-mix(in_srgb,var(--color-accent)_8%,transparent)]"
@@ -203,6 +211,10 @@ export default function MigrationTableList({ diagram, diffMap, selectedTableId, 
                             <span className="mt-0.5 block truncate text-[10px] text-[var(--color-accent)]">
                               {row.matchedColumns.slice(0, 3).join(", ")}
                               {row.matchedColumns.length > 3 ? ` +${row.matchedColumns.length - 3}` : ""}
+                            </span>
+                          ) : row.node.comment ? (
+                            <span className="mt-0.5 block truncate text-[10px] italic text-[var(--color-text-muted)]">
+                              {row.node.comment}
                             </span>
                           ) : null}
                         </span>

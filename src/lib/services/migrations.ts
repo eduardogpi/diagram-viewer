@@ -1,4 +1,6 @@
+import { HttpError } from "@/lib/errors";
 import { prisma } from "@/lib/prisma";
+import { migrationUploadLimits } from "@/lib/services/migration-upload";
 import {
   buildMigrationFiles,
   detectMigrationProvider,
@@ -282,6 +284,29 @@ export async function loadMigrationRange({
   }));
 }
 
+function assertPackageFileLimits(files: MigrationFileInput[]): void {
+  if (files.length > migrationUploadLimits.maxFiles) {
+    throw new HttpError(400, `Limite de ${migrationUploadLimits.maxFiles} arquivos excedido`);
+  }
+  let totalBytes = 0;
+  for (const file of files) {
+    const bytes = Buffer.byteLength(file.content, "utf8");
+    if (bytes > migrationUploadLimits.maxFileSize) {
+      throw new HttpError(
+        400,
+        `Arquivo "${file.name}" excede ${migrationUploadLimits.maxFileSize / 1024 / 1024}MB`
+      );
+    }
+    totalBytes += bytes;
+    if (totalBytes > migrationUploadLimits.maxTotalSize) {
+      throw new HttpError(
+        400,
+        `Tamanho total excede ${migrationUploadLimits.maxTotalSize / 1024 / 1024}MB`
+      );
+    }
+  }
+}
+
 export async function createMigrationPackage({
   connectionId,
   ownerId,
@@ -293,6 +318,7 @@ export async function createMigrationPackage({
   name: string;
   files: MigrationFileInput[];
 }): Promise<MigrationPackageDTO> {
+  assertPackageFileLimits(files);
   const sourceProvider = detectMigrationProvider(files);
   const migrationFiles = buildMigrationFiles(files);
   const checksum = packageChecksum(migrationFiles);
@@ -378,6 +404,7 @@ export async function appendMigrationsToPackage({
   }
 
   const combinedFiles = merge.files;
+  assertPackageFileLimits(combinedFiles);
   const sourceProvider = detectMigrationProvider(combinedFiles);
   const migrationFiles = buildMigrationFiles(combinedFiles);
   const checksum = packageChecksum(migrationFiles);

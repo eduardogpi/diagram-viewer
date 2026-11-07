@@ -8,6 +8,22 @@ function introspection(overrides: Partial<IntrospectionResult> = {}): Introspect
 }
 
 describe("buildDiagramFromIntrospection", () => {
+  it("propaga comentários do catálogo para tabela e colunas (vazio = sem comentário)", () => {
+    const diagram = buildDiagramFromIntrospection(
+      introspection({
+        tables: [{ tableName: "clientes", tableSchema: "public", comment: " Cadastro de clientes " }],
+        columns: [
+          { tableName: "clientes", columnName: "id", columnType: "integer", isNullable: false, isPrimary: true, comment: "" },
+          { tableName: "clientes", columnName: "cpf", columnType: "char(11)", isNullable: true, isPrimary: false, comment: "CPF sem máscara" },
+        ],
+      }),
+      "public"
+    );
+    expect(diagram.nodes[0].comment).toBe("Cadastro de clientes");
+    expect(diagram.nodes[0].columns[0].comment).toBeUndefined();
+    expect(diagram.nodes[0].columns[1].comment).toBe("CPF sem máscara");
+  });
+
   it("monta nós com colunas na ordem recebida e marca a PK", () => {
     const diagram = buildDiagramFromIntrospection(
       introspection({

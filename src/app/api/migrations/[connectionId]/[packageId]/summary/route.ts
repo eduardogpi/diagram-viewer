@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 
 import { requireCurrentUserId } from "@/lib/auth/session";
 import { errorResponse } from "@/lib/errors";
+import { rateLimit } from "@/lib/security/rate-limit";
 import { findConnectionForUser } from "@/lib/services/connections";
 import { summarizeMigration } from "@/lib/services/migration-summary";
 import { logConnectionAudit } from "@/lib/services/workspace";
@@ -19,6 +20,15 @@ export async function POST(req: NextRequest, { params }: RouteContext) {
   try {
     const userId = await requireCurrentUserId();
     const { connectionId, packageId } = await params;
+
+    const rl = rateLimit("ai", userId);
+    if (!rl.allowed) {
+      return NextResponse.json(
+        { error: "Limite de requisições de IA atingido. Aguarde alguns instantes." },
+        { status: 429, headers: rl.retryAfterMs ? { "Retry-After": String(Math.ceil(rl.retryAfterMs / 1000)) } : undefined }
+      );
+    }
+
     const connection = await findConnectionForUser(connectionId, userId);
 
     if (!connection) {

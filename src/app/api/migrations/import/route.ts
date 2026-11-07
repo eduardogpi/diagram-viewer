@@ -63,12 +63,23 @@ export async function POST(req: NextRequest) {
       return { connection, secret };
     });
 
-    const pkg = await createMigrationPackage({
-      connectionId: result.connection.id,
-      ownerId: userId,
-      name,
-      files: inputs,
-    });
+    let pkg;
+    try {
+      pkg = await createMigrationPackage({
+        connectionId: result.connection.id,
+        ownerId: userId,
+        name,
+        files: inputs,
+      });
+    } catch (pkgError) {
+      await prisma
+        .$transaction([
+          prisma.connection.deleteMany({ where: { id: result.connection.id, ownerId: userId } }),
+          prisma.credentialSecret.deleteMany({ where: { id: result.secret.id } }),
+        ])
+        .catch(() => {});
+      throw pkgError;
+    }
 
     await logConnectionAudit({
       action: "MIGRATION_PROJECT_CREATED",

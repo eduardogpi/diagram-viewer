@@ -1,7 +1,14 @@
 import { describe, expect, it } from "vitest";
 
-import { generateDdl, mapType, sortTablesByDependency } from "@/lib/services/ddl-generator";
+import {
+  generateDdl,
+  generateDeltaDdl,
+  inferMigrationSlug,
+  mapType,
+  sortTablesByDependency,
+} from "@/lib/services/ddl-generator";
 import { parseMigrations } from "@/lib/services/migration-parser";
+import { applySchemaOps, type SchemaOp } from "@/lib/services/schema-ops";
 import type { DiagramEdgeDTO, DiagramNodeDTO, DiagramResponse } from "@/lib/types/diagram";
 
 function node(id: string, columns: Array<Partial<DiagramNodeDTO["columns"][number]> & { name: string }>): DiagramNodeDTO {
@@ -167,5 +174,148 @@ describe("generateDdl", () => {
     expect(parsed.finalDiagram.edges).toHaveLength(1);
     expect(parsed.finalDiagram.edges[0].source).toContain("pedidos");
     expect(parsed.finalDiagram.edges[0].target).toContain("clientes");
+  });
+});
+
+describe("generateDeltaDdl & inferMigrationSlug", () => {
+  const deltaOps: SchemaOp[] = [
+    {
+      op: "addColumn",
+      table: "clientes",
+      newColumn: { name: "cpf", type: "VARCHAR(11)", isPrimary: false, isNullable: false },
+    },
+    {
+      op: "alterColumn",
+      table: "pedidos",
+      column: "valor",
+      type: "DECIMAL(12,2)",
+      isNullable: false,
+    },
+    {
+      op: "createTable",
+      table: "pagamentos",
+      columns: [
+        { name: "id", type: "BIGINT", isPrimary: true, isNullable: false },
+        { name: "pedido_id", type: "BIGINT", isPrimary: false, isNullable: false },
+      ],
+    },
+    {
+      op: "addForeignKey",
+      table: "pagamentos",
+      column: "pedido_id",
+      referencesTable: "pedidos",
+      referencesColumn: "id",
+      onDelete: "CASCADE",
+    },
+  ];
+
+  it("gera ALTER TABLE e CREATE TABLE incrementais para MySQL e faz roundtrip com o parser", () => {
+    const v1 = generateDdl(CLIENTES_PEDIDOS, { dialect: "mysql" });
+    const v2 = generateDeltaDdl(deltaOps, { dialect: "mysql", baseDiagram: CLIENTES_PEDIDOS });
+
+    expect(v2).toContain("ALTER TABLE `clientes` ADD COLUMN `cpf` VARCHAR(11) NOT NULL;");
+    expect(v2).toContain("ALTER TABLE `pedidos` MODIFY COLUMN `valor` DECIMAL(12,2) NOT NULL;");
+    expect(v2).toContain("CREATE TABLE `pagamentos`");
+    expect(v2).toContain("ALTER TABLE `pagamentos` ADD CONSTRAINT `fk_pagamentos_pedido_id`");
+
+    const parsed = parseMigrations([
+      { name: "V1__base.sql", content: v1 },
+      { name: "V2__delta.sql", content: v2 },
+    ]);
+    const expected = applySchemaOps(CLIENTES_PEDIDOS, deltaOps).next;
+
+    expect(parsed.warnings).toHaveLength(0);
+    expect(parsed.finalDiagram.nodes.map((n) => n.label).sort()).toEqual(
+      expected.nodes.map((n) => n.label).sort()
+    );
+    expect(parsed.finalDiagram.edges).toHaveLength(expected.edges.length);
+    const pedidos = parsed.finalDiagram.nodes.find((n) => n.label === "pedidos")!;
+    expect(pedidos.columns.find((c) => c.name === "valor")).toMatchObject({
+      type: "DECIMAL(12,2)",
+      isNullable: false,
+    });
+  });
+
+  it("gera ALTER COLUMN (TYPE + SET NOT NULL) para PostgreSQL e faz roundtrip com o parser", () => {
+    const v1 = generateDdl(CLIENTES_PEDIDOS, { dialect: "postgres" });
+    const v2 = generateDeltaDdl(deltaOps, { dialect: "postgres", baseDiagram: CLIENTES_PEDIDOS });
+
+    expect(v2).toContain('ALTER TABLE "pedidos" ALTER COLUMN "valor" TYPE DECIMAL(12,2);');
+    expect(v2).toContain('ALTER TABLE "pedidos" ALTER COLUMN "valor" SET NOT NULL;');
+
+    const parsed = parseMigrations([
+      { name: "V1__base.sql", content: v1 },
+      { name: "V2__delta.sql", content: v2 },
+    ]);
+    expect(parsed.warnings).toHaveLength(0);
+    expect(parsed.finalDiagram.nodes.map((n) => n.label).sort()).toEqual([
+      "clientes",
+      "pagamentos",
+      "pedidos",
+    ]);
+    expect(parsed.finalDiagram.edges).toHaveLength(2);
+  });
+
+  it("gera slugs descritivos para nomes de arquivos Flyway", () => {
+    expect(
+      inferMigrationSlug([
+        {
+          op: "addColumn",
+          table: "clientes",
+          newColumn: { name: "cpf", type: "VARCHAR(11)", isPrimary: false, isNullable: true },
+        },
+      ])
+    ).toBe("add_cpf_to_clientes");
+    expect(inferMigrationSlug(deltaOps)).toBe("update_clientes_pedidos_pagamentos");
+  });
+});
+
+describe("comentários no DDL", () => {
+  const documented: DiagramResponse = {
+    nodes: [
+      {
+        id: "cupons",
+        label: "cupons",
+        schema: "public",
+        scope: "app",
+        comment: "Cupons d'o checkout",
+        columns: [
+          { name: "id", type: "BIGINT", isNullable: false, isPrimary: true, isForeign: false },
+          { name: "codigo", type: "VARCHAR(20)", isNullable: false, isPrimary: false, isForeign: false, comment: "Código \\ digitado" },
+        ],
+      },
+    ],
+    edges: [],
+    scopes: [],
+  };
+
+  it("MySQL: COMMENT inline na coluna e COMMENT= na tabela, com escape", () => {
+    const sql = generateDdl(documented, { dialect: "mysql" });
+    expect(sql).toContain("`codigo` VARCHAR(20) NOT NULL COMMENT 'Código \\\\ digitado'");
+    expect(sql).toContain(") COMMENT='Cupons d''o checkout';");
+  });
+
+  it("Postgres: COMMENT ON TABLE/COLUMN após o CREATE TABLE", () => {
+    const sql = generateDdl(documented, { dialect: "postgres" });
+    expect(sql).toContain(`COMMENT ON TABLE "cupons" IS 'Cupons d''o checkout';`);
+    expect(sql).toContain(`COMMENT ON COLUMN "cupons"."codigo" IS 'Código \\ digitado';`);
+    expect(sql).not.toContain("COMMENT=");
+  });
+
+  it("delta: setComment e alterColumn preservam/emitem comentário por dialeto", () => {
+    const ops: SchemaOp[] = [
+      { op: "setComment", table: "cupons", comment: "" },
+      { op: "setComment", table: "cupons", column: "id", comment: "PK" },
+      { op: "alterColumn", table: "cupons", column: "codigo", type: "VARCHAR(40)" },
+    ];
+    const pg = generateDeltaDdl(ops, { dialect: "postgres", baseDiagram: documented });
+    expect(pg).toContain(`COMMENT ON TABLE "cupons" IS NULL;`);
+    expect(pg).toContain(`COMMENT ON COLUMN "cupons"."id" IS 'PK';`);
+
+    const my = generateDeltaDdl(ops, { dialect: "mysql", baseDiagram: documented });
+    expect(my).toContain("ALTER TABLE `cupons` COMMENT = '';");
+    expect(my).toContain("MODIFY COLUMN `id` BIGINT NOT NULL COMMENT 'PK';");
+    // MODIFY COLUMN sem COMMENT apagaria a documentação existente no MySQL.
+    expect(my).toContain("MODIFY COLUMN `codigo` VARCHAR(40) NOT NULL COMMENT 'Código \\\\ digitado';");
   });
 });

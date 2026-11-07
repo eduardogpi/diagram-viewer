@@ -68,8 +68,9 @@ async function introspect(config: DriverConnectionConfig, options?: IntrospectOp
 
   try {
     // relkind 'r' = tabela comum, 'p' = tabela particionada. Views ('v') ficam de fora, igual ao MySQL.
-    const tables = await client.query<{ table_name: string; table_schema: string }>(
-      `SELECT c.relname AS table_name, n.nspname AS table_schema
+    const tables = await client.query<{ table_name: string; table_schema: string; table_comment: string | null }>(
+      `SELECT c.relname AS table_name, n.nspname AS table_schema,
+              obj_description(c.oid, 'pg_class') AS table_comment
          FROM pg_class c
          JOIN pg_namespace n ON n.oid = c.relnamespace
         WHERE n.nspname = $1
@@ -86,10 +87,12 @@ async function introspect(config: DriverConnectionConfig, options?: IntrospectOp
       column_type: string;
       is_nullable: boolean;
       is_primary: boolean;
+      column_comment: string | null;
     }>(
       `SELECT c.relname AS table_name,
               a.attname AS column_name,
               format_type(a.atttypid, a.atttypmod) AS column_type,
+              col_description(c.oid, a.attnum) AS column_comment,
               NOT a.attnotnull AS is_nullable,
               EXISTS (
                 SELECT 1 FROM pg_constraint pk
@@ -141,13 +144,18 @@ async function introspect(config: DriverConnectionConfig, options?: IntrospectOp
     );
 
     const result: IntrospectionResult = {
-      tables: tables.rows.map((row) => ({ tableName: row.table_name, tableSchema: row.table_schema })),
+      tables: tables.rows.map((row) => ({
+        tableName: row.table_name,
+        tableSchema: row.table_schema,
+        comment: row.table_comment,
+      })),
       columns: columns.rows.map((row) => ({
         tableName: row.table_name,
         columnName: row.column_name,
         columnType: row.column_type,
         isNullable: row.is_nullable,
         isPrimary: row.is_primary,
+        comment: row.column_comment,
       })),
       foreignKeys: foreignKeys.rows.map((row) => ({
         constraintName: row.constraint_name,
